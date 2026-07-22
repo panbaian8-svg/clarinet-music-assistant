@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 const projectRoot = new URL("../", import.meta.url);
@@ -30,17 +30,20 @@ test("server-renders the Music Teaching Assistant workspace", async () => {
   assert.match(html, /本地识谱已启用/);
   assert.match(html, /完整单簧管指法库/);
   assert.match(html, /E3–A6/);
+  assert.match(html, /42 音 · 19 替代/);
+  assert.match(html, /61 套分开指法/);
   assert.match(html, /看得懂、按得对、听得见/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|Building your site/i);
 });
 
 test("ships local recognition, correction tools, and the complete fingering data", async () => {
-  const [page, layout, recognizer, fingerings, packageJson] = await Promise.all([
+  const [page, layout, recognizer, fingerings, packageJson, fingeringAssets] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/lib/score-recognition.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/lib/clarinet.ts", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readdir(new URL("../public/fingerings/", import.meta.url)),
     access(new URL("../public/og.png", import.meta.url)),
   ]);
 
@@ -53,8 +56,11 @@ test("ships local recognition, correction tools, and the complete fingering data
   assert.match(recognizer, /detectAccidental/);
   assert.doesNotMatch(recognizer, /fetch\(|XMLHttpRequest|OPENAI_API_KEY/);
   assert.match(fingerings, /Array\.from\(\{ length: 42 \}/);
-  assert.match(fingerings, /42: \[/);
+  assert.match(fingerings, /TOTAL_FINGERING_VARIANTS/);
+  assert.match(fingerings, /ALTERNATE_FINGERING_SOURCE_INDICES/);
   assert.match(fingerings, /yamaha\.com/);
+  assert.equal(fingeringAssets.filter((name) => name.endsWith(".webp")).length, 61);
+  assert.match(page, /标准单簧管键位图/);
   assert.match(layout, /openGraph/);
   assert.doesNotMatch(page, /SkeletonPreview|_sites-preview/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);

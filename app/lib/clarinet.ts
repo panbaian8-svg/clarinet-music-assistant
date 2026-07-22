@@ -1,29 +1,18 @@
 export const YAMAHA_FINGERING_SOURCE =
   "https://www.yamaha.com/en/musical_instrument_guide/clarinet/play/play002.html";
 
-export type ClarinetKeyId =
-  | "register"
-  | "thumb"
-  | "gSharp"
-  | "aKey"
-  | "l1"
-  | "l2"
-  | "l3"
-  | "upperSide"
-  | "leftSide"
-  | "rightSideInner"
-  | "rightSideOuter"
-  | "r1"
-  | "r2"
-  | "r3"
-  | "lowerLever"
-  | "leftPinkyUpper"
-  | "leftPinkyLower";
-
 export type ClarinetRegister = "低音区" | "喉音区" | "中音区" | "高音区";
 
+export type FingeringVariant = {
+  id: string;
+  name: "主指法" | "替代指法";
+  asset: string;
+  variantIndex: number;
+  sourceIndex: number;
+};
+
 export type Fingering = {
-  keys: ClarinetKeyId[];
+  variants: FingeringVariant[];
   name: string;
   register: ClarinetRegister;
   tip: string;
@@ -44,72 +33,12 @@ export type LessonNote = {
   fingering: Fingering;
 };
 
-export const CLARINET_KEY_LABELS: Record<ClarinetKeyId, string> = {
-  register: "泛音键 R",
-  thumb: "左手拇指孔 T",
-  gSharp: "喉音 G♯ 键",
-  aKey: "A 键",
-  l1: "左手食指 L1",
-  l2: "左手中指 L2",
-  l3: "左手无名指 L3",
-  upperSide: "上节侧键",
-  leftSide: "左侧小键",
-  rightSideInner: "右侧内键",
-  rightSideOuter: "右侧外键",
-  r1: "右手食指 R1",
-  r2: "右手中指 R2",
-  r3: "右手无名指 R3",
-  lowerLever: "下节联动键",
-  leftPinkyUpper: "左手小指上键",
-  leftPinkyLower: "左手小指下键",
-};
-
-// Standard Boehm-system fingerings transcribed and cross-checked note by note
-// against Yamaha's 42-note fingering chart (written E3 through A6).
-const STANDARD_FINGERINGS: Record<number, ClarinetKeyId[]> = {
-  1: ["thumb", "l1", "l2", "l3", "rightSideInner", "r1", "r2", "r3", "leftPinkyLower"],
-  2: ["thumb", "l1", "l2", "l3", "r1", "r2", "r3", "leftPinkyLower"],
-  3: ["thumb", "l1", "l2", "l3", "rightSideOuter", "r1", "r2", "r3", "leftPinkyLower"],
-  4: ["thumb", "l1", "l2", "l3", "r1", "r2", "r3"],
-  5: ["thumb", "l1", "l2", "l3", "r1", "r2", "r3", "leftPinkyUpper"],
-  6: ["thumb", "l1", "l2", "l3", "r1", "r2"],
-  7: ["thumb", "l1", "l2", "l3", "r1"],
-  8: ["thumb", "l1", "l2", "l3", "r2"],
-  9: ["thumb", "l1", "l2", "l3"],
-  10: ["thumb", "l1", "l2", "upperSide", "l3"],
-  11: ["thumb", "l1", "l2"],
-  12: ["thumb", "l1", "l2", "leftSide"],
-  13: ["thumb", "l1"],
-  14: ["thumb"],
-  15: ["l1"],
-  16: [],
-  17: ["gSharp"],
-  18: ["aKey"],
-  19: ["register", "aKey"],
-  20: ["register", "thumb", "l1", "l2", "l3", "rightSideInner", "r1", "r2", "r3", "leftPinkyLower"],
-  21: ["register", "thumb", "l1", "l2", "l3", "r1", "r2", "r3", "leftPinkyLower"],
-  22: ["register", "thumb", "l1", "l2", "l3", "rightSideOuter", "r1", "r2", "lowerLever", "leftPinkyLower"],
-  23: ["register", "thumb", "l1", "l2", "l3", "r1", "r2", "r3"],
-  24: ["register", "thumb", "l1", "l2", "l3", "r1", "r2", "r3", "leftPinkyUpper"],
-  25: ["register", "thumb", "l1", "l2", "l3", "r1", "r2"],
-  26: ["register", "thumb", "l1", "l2", "l3", "r1"],
-  27: ["register", "thumb", "l1", "l2", "l3", "r2"],
-  28: ["register", "thumb", "l1", "l2", "l3"],
-  29: ["register", "thumb", "l1", "l2", "upperSide", "l3"],
-  30: ["register", "thumb", "l1", "l2"],
-  31: ["register", "thumb", "l1", "l2", "leftSide"],
-  32: ["register", "thumb", "l1"],
-  33: ["register", "thumb"],
-  34: ["register", "thumb", "l2", "l3", "r1", "r2"],
-  35: ["register", "thumb", "l2", "l3", "r1", "leftPinkyUpper"],
-  36: ["register", "thumb", "l2", "l3", "r1", "lowerLever", "leftPinkyUpper"],
-  37: ["register", "thumb", "l2", "l3", "leftPinkyUpper"],
-  38: ["register", "thumb", "l2", "upperSide", "l3", "leftPinkyUpper"],
-  39: ["register", "thumb", "l2", "leftPinkyUpper"],
-  40: ["register", "thumb", "l2", "r1", "r2", "leftPinkyUpper"],
-  41: ["register", "thumb", "l2", "l3", "r1", "lowerLever", "leftPinkyUpper"],
-  42: ["register", "thumb", "l2", "l3", "rightSideOuter", "leftPinkyUpper"],
-};
+// Yamaha's chart contains 42 written pitches and 19 explicitly marked
+// alternate fingerings. Each fingering is exported as its own standard chart.
+export const ALTERNATE_FINGERING_SOURCE_INDICES = new Set([
+  1, 2, 3, 8, 12, 15, 19, 20, 21, 22, 27, 31, 34, 35, 36, 38, 39, 40, 41,
+]);
+export const TOTAL_FINGERING_VARIANTS = 42 + ALTERNATE_FINGERING_SOURCE_INDICES.size;
 
 const SHARP_NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
 const FLAT_NAMES = ["C", "D♭", "D", "E♭", "E", "F", "G♭", "G", "A♭", "A", "B♭", "B"];
@@ -155,15 +84,34 @@ export function getFingering(pitch: string): Fingering {
   const midi = pitchToMidi(pitch);
   const sourceIndex = Math.min(42, Math.max(1, midi - 51));
   const register = getClarinetRegister(midi);
-  const keys = STANDARD_FINGERINGS[sourceIndex] ?? [];
-  const name = keys.length === 0 ? "开放指法" : `${register}标准指法`;
+  const chartPitch = midiToPitch(sourceIndex + 51);
+  const assetStem = chartPitch.toLowerCase().replace("♯", "s");
+  const variants: FingeringVariant[] = [
+    {
+      id: `${assetStem}-primary`,
+      name: "主指法",
+      asset: `/fingerings/${assetStem}-primary.webp`,
+      variantIndex: 1,
+      sourceIndex,
+    },
+  ];
+  if (ALTERNATE_FINGERING_SOURCE_INDICES.has(sourceIndex)) {
+    variants.push({
+      id: `${assetStem}-alternate`,
+      name: "替代指法",
+      asset: `/fingerings/${assetStem}-alternate.webp`,
+      variantIndex: 2,
+      sourceIndex,
+    });
+  }
+  const name = `${register} · ${variants.length} 套指法`;
   const tip =
     register === "高音区"
       ? "高音区对口型和气流很敏感。先按图落指，再用更集中、速度更快的气流发音。"
       : register === "喉音区"
         ? "喉音区手指动作很小，保持右手托稳，避免为了找键而改变口型。"
-        : "橙色位置表示需要按下或会联动闭合；每个音孔都要由指腹完整盖严。";
-  return { keys, name, register, tip, sourceIndex };
+        : "红色位置表示需要按下或会联动闭合；每个音孔都要由指腹完整盖严。";
+  return { variants, name, register, tip, sourceIndex };
 }
 
 function diatonicStaffOffset(pitch: string): number {

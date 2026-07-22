@@ -4,13 +4,12 @@ import Image from "next/image";
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   buildLessonNote,
-  CLARINET_KEY_LABELS,
   CLARINET_RANGE,
   DEMO_LESSON,
-  type ClarinetKeyId,
   type ClarinetRegister,
-  type Fingering,
+  type FingeringVariant,
   type LessonNote,
+  TOTAL_FINGERING_VARIANTS,
   YAMAHA_FINGERING_SOURCE,
 } from "./lib/clarinet";
 import { recognizeScoreImage, type RecognitionResult } from "./lib/score-recognition";
@@ -22,7 +21,6 @@ const durationOptions = [
   { beats: 2, label: "二分音符 · 2 拍" },
   { beats: 4, label: "全音符 · 4 拍" },
 ];
-const keyOrder = Object.keys(CLARINET_KEY_LABELS) as ClarinetKeyId[];
 const registerTabs: Array<"全部" | ClarinetRegister> = ["全部", "低音区", "喉音区", "中音区", "高音区"];
 
 function noteHead(pitch: string) {
@@ -39,28 +37,14 @@ function confidenceLabel(confidence: number) {
   return "待校对";
 }
 
-function ClarinetDiagram({ fingering, compact = false }: { fingering: Fingering; compact?: boolean }) {
+function ClarinetDiagram({ variant, compact = false }: { variant: FingeringVariant; compact?: boolean }) {
   return (
-    <div className={`clarinet-diagram ${compact ? "compact" : ""}`} aria-label={`${fingering.register}${fingering.name}指法图`}>
-      <span className="mouthpiece-shape" aria-hidden="true" />
-      <span className="clarinet-rail" aria-hidden="true" />
-      <span className="bell-shape" aria-hidden="true" />
-      {keyOrder.map((key) => {
-        const pressed = fingering.keys.includes(key);
-        return (
-          <span
-            className={`fingering-key key-${key} ${pressed ? "pressed" : ""}`}
-            key={key}
-            title={`${CLARINET_KEY_LABELS[key]}：${pressed ? "按下" : "松开"}`}
-            aria-label={`${CLARINET_KEY_LABELS[key]}${pressed ? "按下" : "松开"}`}
-          >
-            <b>{key === "register" ? "R" : key === "thumb" ? "T" : ""}</b>
-          </span>
-        );
-      })}
-      <span className="diagram-hand-label left">左手</span>
-      <span className="diagram-hand-label right">右手</span>
-    </div>
+    <figure className={`clarinet-diagram ${compact ? "compact" : ""}`} aria-label={`${variant.name}标准单簧管键位图`}>
+      <div className="standard-chart-image">
+        <Image src={variant.asset} alt={`${variant.name}：红色表示按下或联动闭合的键位`} width={210} height={760} sizes={compact ? "190px" : "240px"} />
+      </div>
+      <figcaption><span>{String(variant.variantIndex).padStart(2, "0")}</span><b>{variant.name}</b></figcaption>
+    </figure>
   );
 }
 
@@ -77,14 +61,14 @@ export default function Home() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [bpm, setBpm] = useState(80);
   const [countIn, setCountIn] = useState(true);
-  const [libraryPitch, setLibraryPitch] = useState("G4");
+  const [libraryPitch, setLibraryPitch] = useState("E3");
   const [libraryFilter, setLibraryFilter] = useState<"全部" | ClarinetRegister>("全部");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const timersRef = useRef<number[]>([]);
 
   const selectedNote = lessonNotes[selectedIndex] ?? lessonNotes[0] ?? DEMO_LESSON[0];
-  const libraryEntry = CLARINET_RANGE.find((entry) => entry.value === libraryPitch) ?? CLARINET_RANGE[15];
+  const libraryEntry = CLARINET_RANGE.find((entry) => entry.value === libraryPitch) ?? CLARINET_RANGE[0];
   const libraryNote = buildLessonNote(libraryEntry.value, 1, { id: `library-${libraryEntry.value}`, source: "manual" });
   const filteredLibrary = useMemo(
     () => CLARINET_RANGE.filter((entry) => libraryFilter === "全部" || entry.register === libraryFilter),
@@ -287,7 +271,7 @@ export default function Home() {
           <h1>照片变练习，<br /><em>每个音都有答案。</em></h1>
           <p>识别五线谱中的音高与节奏，逐音核对单簧管指法，再听见降 B 调单簧管实际发出的声音。</p>
           <div className="hero-meta" aria-label="教学特点">
-            <span><b>01</b> 真识谱</span><i /><span><b>02</b> 42 音指法</span><i /><span><b>03</b> 逐拍试听</span>
+            <span><b>01</b> 真识谱</span><i /><span><b>02</b> 61 套指法</span><i /><span><b>03</b> 逐拍试听</span>
           </div>
         </div>
         <div className="hero-quote" aria-label="本次升级">
@@ -379,15 +363,18 @@ export default function Home() {
               </div>
             </div>
 
-            <div className="fingering-card">
+            <div className="fingering-card multi-fingering-card">
               <div className="fingering-copy">
                 <span className="mini-label">FINGERING / {selectedNote.fingering.register}</span>
                 <h4>{selectedNote.fingering.name}</h4>
                 <p>{selectedNote.fingering.tip}</p>
-                <div className="finger-legend"><span><i className="closed" />按下／联动闭合</span><span><i />松开</span></div>
-                <a className="library-jump" href="#fingering-library">查看完整 42 音指法库 →</a>
+                <div className="finger-legend"><span><i className="closed" />按下／联动闭合</span><span><i className="mechanism" />机构定位</span><span><i />开放</span></div>
+                <div className="standard-chart-note"><b>标准键位图</b><span>下管的小拇指弯曲键组与直列键组均按 Yamaha 原图呈现，不再用抽象方块代替。</span></div>
+                <a className="library-jump" href="#fingering-library">查看 42 音 · 61 套分开指法 →</a>
               </div>
-              <ClarinetDiagram fingering={selectedNote.fingering} />
+              <div className="current-variant-grid" role="list" aria-label={`${selectedNote.written} 的全部指法`}>
+                {selectedNote.fingering.variants.map((variant) => <ClarinetDiagram variant={variant} key={variant.id} />)}
+              </div>
             </div>
 
             <div className="teacher-tip"><span aria-hidden="true">!</span><p><b>老师提示</b> 高音区除了指法，还依赖正确口型和气流；网站给出的是标准起始指法。</p></div>
@@ -429,8 +416,8 @@ export default function Home() {
 
       <section className="fingering-library-section" id="fingering-library">
         <div className="library-heading">
-          <div><span className="section-index light">02 / COMPLETE FINGERING LIBRARY</span><h2>完整单簧管指法库</h2><p>降 B 调 Boehm 制式，覆盖书写音 E3–A6 的 42 个半音。点击音名即可看指法并试听实际音高。</p></div>
-          <div className="library-stat"><strong>42</strong><span>STANDARD<br />FINGERINGS</span></div>
+          <div><span className="section-index light">02 / COMPLETE FINGERING LIBRARY</span><h2>完整单簧管指法库</h2><p>降 B 调 Boehm 制式，覆盖书写音 E3–A6 的 42 个半音；19 套替代指法与主指法全部拆开呈现。</p></div>
+          <div className="library-stat"><strong>{TOTAL_FINGERING_VARIANTS}</strong><span>FINGERING<br />CHARTS<i>42 音 · 19 替代</i></span></div>
         </div>
 
         <div className="library-workbench">
@@ -441,7 +428,7 @@ export default function Home() {
             <div className="pitch-grid">
               {filteredLibrary.map((entry) => (
                 <button type="button" className={libraryPitch === entry.value ? "selected" : ""} onClick={() => { setLibraryPitch(entry.value); playTone(buildLessonNote(entry.value).frequency); }} key={entry.value}>
-                  <strong>{noteHead(entry.value)}</strong><small>{noteOctave(entry.value)}</small><span>{entry.register}</span>
+                  <strong>{noteHead(entry.value)}</strong><small>{noteOctave(entry.value)}</small><span>{entry.register}</span>{entry.fingering.variants.length > 1 && <em>{entry.fingering.variants.length} 种</em>}
                 </button>
               ))}
             </div>
@@ -449,14 +436,17 @@ export default function Home() {
 
           <article className="library-detail">
             <div className="library-note-title"><span>{libraryNote.solfege}</span><strong>{noteHead(libraryNote.written)}<i>{noteOctave(libraryNote.written)}</i></strong><button type="button" onClick={() => playTone(libraryNote.frequency)}>▶ 听 {libraryNote.sounding}</button></div>
-            <div className="library-diagram-wrap"><ClarinetDiagram fingering={libraryEntry.fingering} compact /></div>
+            <div className={`library-diagram-wrap variants-${libraryEntry.fingering.variants.length}`} role="list" aria-label={`${libraryEntry.value} 的全部指法`}>
+              {libraryEntry.fingering.variants.map((variant) => <ClarinetDiagram variant={variant} compact key={variant.id} />)}
+            </div>
             <div className="library-description">
               <span className="register-chip">{libraryEntry.register}</span><h3>{libraryEntry.fingering.name}</h3><p>{libraryEntry.fingering.tip}</p>
-              <div className="pressed-key-list"><b>图中标记</b>{libraryEntry.fingering.keys.length ? libraryEntry.fingering.keys.map((key) => <span key={key}>{CLARINET_KEY_LABELS[key]}</span>) : <span>全部开放</span>}</div>
+              <div className="chart-legend"><b>标准图例</b><span><i className="closed" />红色：按下或联动闭合</span><span><i className="mechanism" />灰色：机构定位</span><span><i />白色：开放</span></div>
+              {libraryEntry.fingering.variants.length > 1 && <p className="alternate-guidance">替代指法不是合并按法：请一次只选择其中一张图练习，并根据前后音连接和音准选用。</p>}
             </div>
           </article>
         </div>
-        <p className="library-source">标准指法依据 <a href={YAMAHA_FINGERING_SOURCE} target="_blank" rel="noreferrer">Yamaha Musical Instrument Guide</a> 逐音核对。高音区可能因乐器型号、音准与个人口型采用替代指法。</p>
+        <p className="library-source">42 个音的主指法与 19 套替代指法依据 <a href={YAMAHA_FINGERING_SOURCE} target="_blank" rel="noreferrer">Yamaha Musical Instrument Guide</a> 逐项拆分。高音区仍可能因乐器型号、音准与个人口型采用其他教学指法。</p>
       </section>
 
       <section className="learning-path" id="path">
