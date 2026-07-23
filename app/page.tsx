@@ -52,7 +52,14 @@ function ClarinetDiagram({ variant, compact = false }: { variant: FingeringVaria
   return (
     <figure className={`clarinet-diagram ${compact ? "compact" : ""}`} aria-label={`${variant.name}标准单簧管键位图`}>
       <div className="standard-chart-image">
-        <Image src={variant.asset} alt={`${variant.name}：红色表示按下或联动闭合的键位`} width={210} height={760} sizes={compact ? "190px" : "240px"} />
+        <Image
+          src={variant.asset}
+          alt={`${variant.name}：红色表示按下或联动闭合的键位`}
+          width={210}
+          height={760}
+          sizes={compact ? "190px" : "240px"}
+          unoptimized
+        />
       </div>
       <figcaption><span>{String(variant.variantIndex).padStart(2, "0")}</span><b>{variant.name}</b></figcaption>
     </figure>

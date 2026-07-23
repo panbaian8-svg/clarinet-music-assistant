@@ -35,14 +35,17 @@ test("server-renders the Music Teaching Assistant workspace", async () => {
   assert.match(html, /E3–A6/);
   assert.match(html, /42 音 · 19 替代/);
   assert.match(html, /61 套分开指法/);
+  assert.match(html, /\/fingerings\/[^"]+\.webp/);
+  assert.doesNotMatch(html, /\/_next\/image\?/);
   assert.match(html, /看得懂、按得对、听得见/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|Building your site/i);
 });
 
 test("ships local recognition, correction tools, and the complete fingering data", async () => {
-  const [page, layout, recognizer, fingerings, packageJson, fingeringAssets] = await Promise.all([
+  const [page, layout, styles, recognizer, fingerings, packageJson, fingeringAssets] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../app/lib/score-recognition.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/lib/clarinet.ts", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -54,6 +57,9 @@ test("ships local recognition, correction tools, and the complete fingering data
   assert.match(page, /校对当前音符/);
   assert.match(page, /new AudioContext\(\)/);
   assert.match(page, /type="file"/);
+  assert.match(page, /sizes=\{compact \? "190px" : "240px"\}\s+unoptimized/);
+  assert.match(styles, /\.lab-grid\s*\{[^}]*align-items:\s*start/s);
+  assert.match(styles, /\.score-panel,\s*\.fingering-panel\s*\{[^}]*align-self:\s*start/s);
   assert.match(recognizer, /estimateSkew/);
   assert.match(recognizer, /detectStaves/);
   assert.match(recognizer, /detectAccidental/);

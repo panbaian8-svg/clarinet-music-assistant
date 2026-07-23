@@ -66,11 +66,22 @@ export type RestGlyphFeatures = {
   lobeCount: number;
 };
 
-type BinaryImage = {
+export type BinaryImage = {
   data: Uint8Array;
   width: number;
   height: number;
   threshold: number;
+};
+
+export type BinaryScoreEvent = {
+  kind: "note" | "rest";
+  written: string;
+  beats: number;
+  rhythmMark: "plain" | "dotted";
+  staffIndex: number;
+  x: number;
+  y: number;
+  confidence: number;
 };
 
 const clamp = (value: number, min: number, max: number) =>
@@ -105,6 +116,7 @@ export function classifyRestGlyph(features: RestGlyphFeatures): {
   if (
     widthRatio >= 0.5 && widthRatio <= 1.95 &&
     heightRatio >= 2.05 && heightRatio <= 3.95 &&
+    centerOffset >= -1.45 && centerOffset <= 1.55 &&
     lobeCount >= 3
   ) {
     return { restType: "sixteenth", beats: 0.25, confidence: clamp(0.58 + lobeCount * 0.05, 0.62, 0.86) };
@@ -113,6 +125,7 @@ export function classifyRestGlyph(features: RestGlyphFeatures): {
   if (
     widthRatio >= 0.4 && widthRatio <= 1.85 &&
     heightRatio >= 1.05 && heightRatio <= 2.55 &&
+    centerOffset >= -1.45 && centerOffset <= 1.55 &&
     lobeCount <= 2
   ) {
     return { restType: "eighth", beats: 0.5, confidence: clamp(0.74 - Math.abs(heightRatio - 1.75) * 0.08, 0.6, 0.86) };
@@ -120,7 +133,8 @@ export function classifyRestGlyph(features: RestGlyphFeatures): {
 
   if (
     widthRatio >= 0.34 && widthRatio <= 1.55 &&
-    heightRatio >= 1.75 && heightRatio <= 4.15
+    heightRatio >= 1.75 && heightRatio <= 4.15 &&
+    centerOffset >= -1.45 && centerOffset <= 1.55
   ) {
     return { restType: "quarter", beats: 1, confidence: clamp(0.7 - Math.abs(widthRatio - 0.85) * 0.08, 0.56, 0.82) };
   }
@@ -179,17 +193,18 @@ function otsuThreshold(histogram: Uint32Array, total: number) {
   return clamp(bestThreshold + 8, 95, 215);
 }
 
-function binarize(canvas: HTMLCanvasElement): BinaryImage {
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  if (!context) throw new Error("无法读取图片像素");
-  const { width, height } = canvas;
-  const image = context.getImageData(0, 0, width, height);
+export function binarizeRgbaPixels(
+  rgba: Uint8Array | Uint8ClampedArray,
+  width: number,
+  height: number,
+  channels = 4,
+): BinaryImage {
   const gray = new Uint8Array(width * height);
   const histogram = new Uint32Array(256);
 
   for (let pixel = 0; pixel < gray.length; pixel += 1) {
-    const offset = pixel * 4;
-    const value = luminance(image.data[offset], image.data[offset + 1], image.data[offset + 2]);
+    const offset = pixel * channels;
+    const value = luminance(rgba[offset], rgba[offset + 1], rgba[offset + 2]);
     gray[pixel] = value;
     histogram[value] += 1;
   }
@@ -197,6 +212,14 @@ function binarize(canvas: HTMLCanvasElement): BinaryImage {
   const data = new Uint8Array(gray.length);
   for (let pixel = 0; pixel < gray.length; pixel += 1) data[pixel] = gray[pixel] < threshold ? 1 : 0;
   return { data, width, height, threshold };
+}
+
+function binarize(canvas: HTMLCanvasElement): BinaryImage {
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("无法读取图片像素");
+  const { width, height } = canvas;
+  const image = context.getImageData(0, 0, width, height);
+  return binarizeRgbaPixels(image.data, width, height);
 }
 
 function projectionScore(canvas: HTMLCanvasElement) {
@@ -440,20 +463,32 @@ function countProjectionLobes(data: Uint8Array, width: number, component: GlyphC
 }
 
 function detectAugmentationDot(
-  integral: Uint32Array,
+  data: Uint8Array,
   width: number,
   height: number,
   rightEdge: number,
   y: number,
   spacing: number,
 ) {
-  const x0 = rightEdge + spacing * 0.42;
-  const x1 = rightEdge + spacing * 1.45;
-  const y0 = y - spacing * 0.48;
-  const y1 = y + spacing * 0.48;
-  const ink = rectangleSum(integral, width, height, x0, y0, x1, y1);
-  const normalizedInk = ink / Math.max(1, spacing * spacing);
-  return normalizedInk >= 0.035 && normalizedInk <= 0.32;
+  const x0 = rightEdge + spacing * 0.18;
+  const x1 = rightEdge + spacing * 1.02;
+  const y0 = y - spacing * 0.72;
+  const y1 = y + spacing * 0.72;
+  const components = connectedComponents(data, width, height, { x0, y0, x1, y1 });
+  return components.some((component) => {
+    const componentWidth = component.x1 - component.x0 + 1;
+    const componentHeight = component.y1 - component.y0 + 1;
+    const centerY = (component.y0 + component.y1) / 2;
+    return (
+      componentWidth >= spacing * 0.14 &&
+      componentWidth <= spacing * 0.52 &&
+      componentHeight >= spacing * 0.14 &&
+      componentHeight <= spacing * 0.52 &&
+      component.pixels >= spacing * spacing * 0.025 &&
+      component.pixels <= spacing * spacing * 0.24 &&
+      Math.abs(centerY - y) <= spacing * 0.62
+    );
+  });
 }
 
 function longestVerticalRun(data: Uint8Array, width: number, height: number, x: number, y0: number, y1: number) {
@@ -476,6 +511,63 @@ function longestVerticalRun(data: Uint8Array, width: number, height: number, x: 
   return { length: longest, start: bestStart, end: bestStart + longest };
 }
 
+function longestBoundedHorizontalRun(
+  data: Uint8Array,
+  width: number,
+  height: number,
+  x0: number,
+  x1: number,
+  y0: number,
+  y1: number,
+  maximumRun: number,
+) {
+  let longest = 0;
+  for (let y = clamp(Math.round(y0), 0, height - 1); y <= clamp(Math.round(y1), 0, height - 1); y += 1) {
+    let current = 0;
+    const record = () => {
+      if (current <= maximumRun) longest = Math.max(longest, current);
+      current = 0;
+    };
+    for (let x = clamp(Math.round(x0), 0, width - 1); x <= clamp(Math.round(x1), 0, width - 1); x += 1) {
+      if (data[y * width + x]) {
+        current += 1;
+      } else {
+        record();
+      }
+    }
+    record();
+  }
+  return longest;
+}
+
+function horizontalRunCoverage(
+  data: Uint8Array,
+  width: number,
+  height: number,
+  x0: number,
+  x1: number,
+  y0: number,
+  y1: number,
+  minimumRun: number,
+  maximumRun = Number.POSITIVE_INFINITY,
+) {
+  let coveredRows = 0;
+  for (let y = clamp(Math.round(y0), 0, height - 1); y <= clamp(Math.round(y1), 0, height - 1); y += 1) {
+    let longest = 0;
+    let current = 0;
+    for (let x = clamp(Math.round(x0), 0, width - 1); x <= clamp(Math.round(x1), 0, width - 1); x += 1) {
+      if (data[y * width + x]) {
+        current += 1;
+        longest = Math.max(longest, current);
+      } else {
+        current = 0;
+      }
+    }
+    if (longest >= minimumRun && longest <= maximumRun) coveredRows += 1;
+  }
+  return coveredRows;
+}
+
 function detectAccidental(
   integral: Uint32Array,
   data: Uint8Array,
@@ -485,12 +577,12 @@ function detectAccidental(
   y: number,
   spacing: number,
 ): "♯" | "♭" | "" {
-  const left = Math.round(x - spacing * 2.15);
-  const right = Math.round(x - spacing * 0.72);
+  const left = Math.round(x - spacing * 1.58);
+  const right = Math.round(x - spacing * 0.76);
   const top = Math.round(y - spacing * 1.35);
   const bottom = Math.round(y + spacing * 1.35);
   const ink = rectangleSum(integral, width, height, left, top, right, bottom);
-  if (ink < spacing * spacing * 0.42) return "";
+  if (ink < spacing * spacing * 0.32 || ink > spacing * spacing * 1.55) return "";
 
   const peaks: number[] = [];
   for (let column = left; column <= right; column += 1) {
@@ -498,12 +590,23 @@ function detectAccidental(
     for (let row = top; row <= bottom; row += 1) {
       if (row >= 0 && row < height && column >= 0 && column < width) count += data[row * width + column];
     }
-    if (count > spacing * 1.15 && (peaks.length === 0 || column - peaks[peaks.length - 1] > spacing * 0.28)) {
+    if (count > spacing * 1.32 && (peaks.length === 0 || column - peaks[peaks.length - 1] > spacing * 0.24)) {
       peaks.push(column);
     }
   }
-  if (peaks.length >= 2) return "♯";
-  if (peaks.length === 1) return "♭";
+  if (peaks.length === 2 && peaks[1] - peaks[0] <= spacing * 0.62) return "♯";
+  if (peaks.length === 1) {
+    const lowerLobe = rectangleSum(
+      integral,
+      width,
+      height,
+      peaks[0] + spacing * 0.08,
+      y - spacing * 0.05,
+      right,
+      y + spacing * 1.05,
+    );
+    if (lowerLobe > spacing * spacing * 0.17) return "♭";
+  }
   return "";
 }
 
@@ -535,29 +638,94 @@ function detectFlagCount(
 }
 
 function detectBeamCount(
-  integral: Uint32Array,
+  data: Uint8Array,
   width: number,
   height: number,
   first: NoteCandidate,
   second: NoteCandidate,
   spacing: number,
 ) {
-  if (first.stemUp !== second.stemUp) return 0;
-  const left = Math.min(first.stemX, second.stemX);
-  const right = Math.max(first.stemX, second.stemX);
+  const firstIsLeft = first.x <= second.x;
+  const leftNote = firstIsLeft ? first : second;
+  const rightNote = firstIsLeft ? second : first;
+  const left = leftNote.x;
+  const right = rightNote.x;
   if (right - left < spacing * 0.65) return 0;
-  const direction = first.stemUp ? 1 : -1;
-  const endpointMin = Math.min(first.stemTop, second.stemTop);
-  const endpointMax = Math.max(first.stemTop, second.stemTop);
-  const stripRatio = (offset: number) => {
-    const top = endpointMin + direction * spacing * offset - spacing * 0.2;
-    const bottom = endpointMax + direction * spacing * offset + spacing * 0.2;
-    const ink = rectangleSum(integral, width, height, left, top, right, bottom);
-    const area = Math.max(1, (right - left) * Math.max(spacing * 0.4, bottom - top));
-    return ink / area;
+  const inset = Math.max(1, Math.round(spacing * 0.48));
+  const halfBand = Math.max(1, Math.round(spacing * 0.17));
+  const stripStats = (leftY: number, rightY: number) => {
+    let ink = 0;
+    let samples = 0;
+    let coveredColumns = 0;
+    let columns = 0;
+    const start = clamp(Math.round(left) + inset, 0, width - 1);
+    const end = clamp(Math.round(right) - inset, 0, width - 1);
+    for (let x = start; x <= end; x += 1) {
+      const progress = (x - left) / Math.max(1, right - left);
+      const centerY = leftY + (rightY - leftY) * progress;
+      let columnInk = 0;
+      for (let dy = -halfBand; dy <= halfBand; dy += 1) {
+        const y = Math.round(centerY + dy);
+        if (y < 0 || y >= height) continue;
+        columnInk += data[y * width + x];
+        samples += 1;
+      }
+      ink += columnInk;
+      coveredColumns += Number(columnInk > 0);
+      columns += 1;
+    }
+    return {
+      ratio: ink / Math.max(1, samples),
+      coverage: coveredColumns / Math.max(1, columns),
+    };
   };
-  if (stripRatio(0) < 0.25) return 0;
-  return stripRatio(0.62) > 0.24 ? 2 : 1;
+  let bestRatio = 0;
+  let bestCoverage = 0;
+  let bestDirection = 0;
+  let bestLeftY = 0;
+  let bestRightY = 0;
+  const attachedStats = stripStats(leftNote.stemTop, rightNote.stemTop);
+  if (attachedStats.ratio >= 0.42 && attachedStats.coverage >= 0.72) {
+    bestRatio = attachedStats.ratio;
+    bestCoverage = attachedStats.coverage;
+    bestDirection = Math.sign(
+      (leftNote.stemTop + rightNote.stemTop - leftNote.y - rightNote.y) / 2,
+    ) || 1;
+    bestLeftY = leftNote.stemTop;
+    bestRightY = rightNote.stemTop;
+  } else {
+    if (first.dotted || second.dotted) return 0;
+    for (const direction of [-1, 1]) {
+      for (let offset = 1.45; offset <= 3.95; offset += 0.22) {
+        for (let tilt = -0.7; tilt <= 0.7; tilt += 0.2) {
+          const leftY = leftNote.y + direction * spacing * offset;
+          const rightY = rightNote.y + direction * spacing * (offset + tilt);
+          const stats = stripStats(leftY, rightY);
+          const quality = stats.ratio * Math.min(1, stats.coverage / 0.82);
+          const bestQuality = bestRatio * Math.min(1, bestCoverage / 0.82);
+          if (quality > bestQuality) {
+            bestRatio = stats.ratio;
+            bestCoverage = stats.coverage;
+            bestDirection = direction;
+            bestLeftY = leftY;
+            bestRightY = rightY;
+          }
+        }
+      }
+    }
+  }
+  if (bestRatio < 0.48 || bestCoverage < 0.76) return 0;
+  let secondaryRatio = 0;
+  let secondaryCoverage = 0;
+  for (let separation = 0.48; separation <= 0.8; separation += 0.08) {
+    const secondaryOffset = bestDirection * spacing * separation;
+    const stats = stripStats(bestLeftY - secondaryOffset, bestRightY - secondaryOffset);
+    if (stats.ratio * stats.coverage > secondaryRatio * secondaryCoverage) {
+      secondaryRatio = stats.ratio;
+      secondaryCoverage = stats.coverage;
+    }
+  }
+  return secondaryRatio > 0.5 && secondaryCoverage > 0.74 ? 2 : 1;
 }
 
 export function pitchFromStaffStep(step: number, accidental: "♯" | "♭" | "") {
@@ -576,70 +744,183 @@ function detectNoteCandidates(binary: BinaryImage, clean: Uint8Array, staves: St
 
   staves.forEach((staff, staffIndex) => {
     const spacing = staff.spacing;
-    const rx = Math.max(3, spacing * 0.72);
-    const ry = Math.max(2, spacing * 0.48);
-    const startX = Math.max(staff.left + spacing * 6.2, width * 0.07);
+    const rx = Math.max(3, spacing * 0.64);
+    const ry = Math.max(2, spacing * 0.42);
+    const clefAndMeterWidth = staffIndex === 0 ? spacing * 6.2 : spacing * 4.05;
+    const startX = Math.max(staff.left + clefAndMeterWidth, width * 0.045);
     const endX = Math.min(staff.right - spacing, width * 0.98);
-    const scanStep = Math.max(1, Math.round(spacing * 0.18));
+    const scanStep = Math.max(1, Math.round(spacing * 0.12));
 
-    for (let step = -7; step <= 17; step += 1) {
+    for (let step = -1; step <= 12; step += 1) {
       const y = staff.lines[4] - (step * spacing) / 2;
       if (y < 2 || y >= height - 2) continue;
       const scores: Array<{ x: number; score: number }> = [];
       for (let x = startX; x <= endX; x += scanStep) {
         const ink = rectangleSum(cleanIntegral, width, height, x - rx, y - ry, x + rx, y + ry);
         const area = Math.max(1, Math.round(rx * 2) * Math.round(ry * 2));
-        const score = ink / area;
-        scores.push({ x, score });
+        scores.push({ x, score: ink / area });
       }
 
       for (let index = 1; index < scores.length - 1; index += 1) {
         const current = scores[index];
-        if (current.score < 0.13 || current.score < scores[index - 1].score || current.score < scores[index + 1].score) continue;
+        if (current.score < 0.17 || current.score < scores[index - 1].score || current.score < scores[index + 1].score) continue;
+        let candidateX = current.x;
+        let bestCenterInk = -1;
+        for (let probeX = Math.round(current.x - spacing * 0.55); probeX <= Math.round(current.x + spacing * 0.55); probeX += 1) {
+          const centerInk =
+            rectangleSum(
+              cleanIntegral,
+              width,
+              height,
+              probeX - spacing * 0.48,
+              y - spacing * 0.38,
+              probeX + spacing * 0.48,
+              y + spacing * 0.38,
+            ) +
+            rectangleSum(
+              rawIntegral,
+              width,
+              height,
+              probeX - spacing * 0.26,
+              y - spacing * 0.2,
+              probeX + spacing * 0.26,
+              y + spacing * 0.2,
+            ) * 0.35;
+          if (centerInk > bestCenterInk) {
+            bestCenterInk = centerInk;
+            candidateX = probeX;
+          }
+        }
         const horizontalInk = rectangleSum(
           cleanIntegral,
           width,
           height,
-          current.x - spacing * 0.72,
+          candidateX - spacing * 0.72,
           y - spacing * 0.26,
-          current.x + spacing * 0.72,
+          candidateX + spacing * 0.72,
           y + spacing * 0.26,
         );
-        if (horizontalInk < spacing * 0.55) continue;
+        if (horizontalInk < spacing * 0.6) continue;
+        const headRun = longestBoundedHorizontalRun(
+          clean,
+          width,
+          height,
+          candidateX - spacing * 1.35,
+          candidateX + spacing * 1.35,
+          y - spacing * 0.28,
+          y + spacing * 0.28,
+          spacing * 1.7,
+        );
+        if (headRun < spacing * 0.48 || headRun > spacing * 1.62) continue;
+        const headCoverage = horizontalRunCoverage(
+          clean,
+          width,
+          height,
+          candidateX - spacing,
+          candidateX + spacing,
+          y - spacing * 0.5,
+          y + spacing * 0.5,
+          spacing * 0.38,
+          spacing * 1.8,
+        );
+        if (headCoverage < spacing * 0.42) continue;
 
         const innerInk = rectangleSum(
           rawIntegral,
           width,
           height,
-          current.x - spacing * 0.32,
+          candidateX - spacing * 0.32,
           y - spacing * 0.22,
-          current.x + spacing * 0.32,
+          candidateX + spacing * 0.32,
           y + spacing * 0.22,
         );
         const innerArea = Math.max(1, spacing * 0.64 * spacing * 0.44);
-        const filled = innerInk / innerArea > 0.48;
-        const leftStem = longestVerticalRun(clean, width, height, Math.round(current.x - rx), Math.round(y - spacing * 3.2), Math.round(y + spacing * 3.2));
-        const rightStem = longestVerticalRun(clean, width, height, Math.round(current.x + rx), Math.round(y - spacing * 3.2), Math.round(y + spacing * 3.2));
-        const stem = rightStem.length >= leftStem.length ? rightStem : leftStem;
-        const stemUp = rightStem.length >= leftStem.length;
-        const hasStem = stem.length > spacing * 1.65;
-        const beats = filled ? 1 : hasStem ? 2 : 4;
-        const accidental = detectAccidental(rawIntegral, data, width, height, current.x, y, spacing);
+        const innerRatio = innerInk / innerArea;
+        const coreInk = rectangleSum(
+          rawIntegral,
+          width,
+          height,
+          candidateX - spacing * 0.18,
+          y - spacing * 0.14,
+          candidateX + spacing * 0.18,
+          y + spacing * 0.14,
+        );
+        const coreArea = Math.max(1, spacing * 0.36 * spacing * 0.28);
+        const coreRatio = coreInk / coreArea;
+        const filled = innerRatio > 0.88 && coreRatio > 1.12;
+        const stemProbeOffsets = [0.46, 0.58, 0.7, 0.82, 0.94, 1.06, 1.18];
+        const leftStemProbe = stemProbeOffsets
+          .map((offset) => ({
+            offset,
+            run: longestVerticalRun(clean, width, height, Math.round(candidateX - spacing * offset), Math.round(y - spacing * 3.2), Math.round(y + spacing * 3.2)),
+          }))
+          .sort((a, b) => b.run.length - a.run.length)[0];
+        const rightStemProbe = stemProbeOffsets
+          .map((offset) => ({
+            offset,
+            run: longestVerticalRun(clean, width, height, Math.round(candidateX + spacing * offset), Math.round(y - spacing * 3.2), Math.round(y + spacing * 3.2)),
+          }))
+          .sort((a, b) => b.run.length - a.run.length)[0];
+        const leftStem = leftStemProbe.run;
+        const rightStem = rightStemProbe.run;
+        const rightAttached =
+          rightStem.length > spacing * 1.2 &&
+          rightStem.length <= spacing * 4.2 &&
+          rightStem.start < y - spacing * 0.9 &&
+          rightStem.end >= y - spacing * 0.34 &&
+          rightStem.end <= y + spacing * 0.95;
+        const leftAttached =
+          leftStem.length > spacing * 1.2 &&
+          leftStem.length <= spacing * 4.2 &&
+          leftStem.start >= y - spacing * 0.95 &&
+          leftStem.start <= y + spacing * 0.34 &&
+          leftStem.end > y + spacing * 0.9;
+        const stemUp = rightAttached || (!leftAttached && rightStem.length >= leftStem.length);
+        const stem = stemUp ? rightStem : leftStem;
+        const hasStem = rightAttached || leftAttached;
+        if (filled && !hasStem) continue;
+        if (!filled && headRun < spacing * 0.72) continue;
+        if (!filled && !hasStem && headCoverage < spacing * 0.42) continue;
+        if (!filled && !hasStem && headRun > spacing * 1.34) continue;
+        const runRatio = headRun / spacing;
+        const coverageRatio = headCoverage / spacing;
+        const runShapeScore = clamp(1 - Math.abs(runRatio - 1.12) / 0.82, 0, 1);
+        const coverageShapeScore = clamp(1 - Math.abs(coverageRatio - 0.72) / 0.72, 0, 1);
+        const fillEvidence = filled
+          ? clamp(innerRatio, 0, 1)
+          : clamp((0.58 - innerRatio) / 0.58, 0, 1);
+        const headScore =
+          clamp(current.score, 0, 1) * 0.42 +
+          runShapeScore * 0.16 +
+          coverageShapeScore * 0.19 +
+          fillEvidence * 0.18 +
+          (hasStem ? 0.05 : 0);
+        if (headScore < 0.5) continue;
+        const centerVerticalRun = longestVerticalRun(
+          data,
+          width,
+          height,
+          Math.round(candidateX),
+          Math.round(staff.lines[0] - spacing * 0.8),
+          Math.round(staff.lines[4] + spacing * 0.8),
+        );
+        if (centerVerticalRun.length > spacing * 3.6) continue;
+        const accidental = detectAccidental(cleanIntegral, clean, width, height, candidateX, y, spacing);
         candidates.push({
           kind: "note",
           staffIndex,
-          x: current.x,
+          x: candidateX,
           y,
           step,
-          score: current.score,
+          score: headScore,
           filled,
           stemUp,
           stemTop: stemUp ? stem.start : stem.end,
-          beats,
+          beats: filled ? 1 : hasStem ? 2 : 4,
           accidental,
           dotted: false,
           subdivisionCount: 0,
-          stemX: current.x + (stemUp ? rx : -rx),
+          stemX: candidateX + spacing * (stemUp ? rightStemProbe.offset : -leftStemProbe.offset),
         });
       }
     }
@@ -652,17 +933,96 @@ function detectNoteCandidates(binary: BinaryImage, clean: Uint8Array, staves: St
     const duplicate = kept.some(
       (existing) =>
         existing.staffIndex === candidate.staffIndex &&
-        Math.abs(existing.x - candidate.x) < spacing * 1.15 &&
-        Math.abs(existing.y - candidate.y) < spacing * 0.9,
+        (
+          Math.abs(existing.stemX - candidate.stemX) < spacing * 0.5 ||
+          Math.abs(existing.x - candidate.x) < spacing * 1.52 ||
+          (
+            Math.abs(existing.x - candidate.x) < spacing * 1.18 &&
+            Math.abs(existing.y - candidate.y) < spacing * 0.9
+          )
+        ),
     );
     if (!duplicate) kept.push(candidate);
   }
   kept.sort((a, b) => a.staffIndex - b.staffIndex || a.x - b.x);
-
-  kept.forEach((candidate) => {
-    if (!candidate.filled) return;
+  staves.forEach((staff, staffIndex) => {
+    const staffIndexes = kept
+      .map((candidate, index) => ({ candidate, index }))
+      .filter(({ candidate }) => candidate.staffIndex === staffIndex);
+    const original = staffIndexes.map(({ candidate }) => candidate);
+    const optionGroups = original.map((current, localIndex) => {
+      const prior = original[localIndex - 1];
+      const next = original[localIndex + 1];
+      const leftBoundary = prior ? (prior.x + current.x) / 2 : current.x - staff.spacing * 2.2;
+      const rightBoundary = next ? (current.x + next.x) / 2 : current.x + staff.spacing * 2.2;
+      const alternatives = candidates.filter(
+        (candidate) =>
+          candidate.staffIndex === staffIndex &&
+          candidate.x >= leftBoundary &&
+          candidate.x <= rightBoundary &&
+          Math.abs(candidate.x - current.x) < staff.spacing * 1.75,
+      );
+      return alternatives.length > 0 ? alternatives : [current];
+    });
+    const pathScores: number[][] = [];
+    const pathPrevious: number[][] = [];
+    optionGroups.forEach((group, groupIndex) => {
+      pathScores[groupIndex] = [];
+      pathPrevious[groupIndex] = [];
+      group.forEach((candidate, optionIndex) => {
+        if (groupIndex === 0) {
+          pathScores[groupIndex][optionIndex] = candidate.score;
+          pathPrevious[groupIndex][optionIndex] = -1;
+          return;
+        }
+        let bestScore = Number.NEGATIVE_INFINITY;
+        let bestPrevious = -1;
+        optionGroups[groupIndex - 1].forEach((prior, priorIndex) => {
+          if (candidate.x - prior.x < staff.spacing * 1.52) return;
+          const jumpPenalty = Math.max(0, Math.abs(candidate.step - prior.step) - 2) * 0.045;
+          const score = pathScores[groupIndex - 1][priorIndex] + candidate.score - jumpPenalty;
+          if (score > bestScore) {
+            bestScore = score;
+            bestPrevious = priorIndex;
+          }
+        });
+        pathScores[groupIndex][optionIndex] = bestScore;
+        pathPrevious[groupIndex][optionIndex] = bestPrevious;
+      });
+    });
+    if (optionGroups.length === 0) return;
+    let optionIndex = pathScores.at(-1)!.reduce(
+      (best, score, index, row) => (score > row[best] ? index : best),
+      0,
+    );
+    for (let groupIndex = optionGroups.length - 1; groupIndex >= 0; groupIndex -= 1) {
+      kept[staffIndexes[groupIndex].index] = optionGroups[groupIndex][optionIndex];
+      optionIndex = pathPrevious[groupIndex][optionIndex];
+      if (optionIndex < 0 && groupIndex > 0) optionIndex = 0;
+    }
+  });
+  kept.sort((a, b) => a.staffIndex - b.staffIndex || a.x - b.x);
+  kept.forEach((candidate, index) => {
+    if (!candidate.accidental) return;
     const spacing = staves[candidate.staffIndex].spacing;
-    candidate.subdivisionCount = detectFlagCount(rawIntegral, width, height, candidate, spacing);
+    const previousNote = kept[index - 1];
+    if (
+      previousNote?.staffIndex === candidate.staffIndex &&
+      candidate.x - previousNote.x < spacing * 2.2
+    ) {
+      candidate.accidental = "";
+    }
+  });
+  kept.forEach((candidate) => {
+    const spacing = staves[candidate.staffIndex].spacing;
+    candidate.dotted = detectAugmentationDot(
+      clean,
+      width,
+      height,
+      candidate.x + spacing * 0.72,
+      candidate.y,
+      spacing,
+    );
   });
 
   for (let index = 0; index < kept.length - 1; index += 1) {
@@ -670,22 +1030,19 @@ function detectNoteCandidates(binary: BinaryImage, clean: Uint8Array, staves: St
     const second = kept[index + 1];
     if (!first.filled || !second.filled || first.staffIndex !== second.staffIndex) continue;
     const spacing = staves[first.staffIndex].spacing;
-    if (second.x - first.x > spacing * 5.2) continue;
-    const beamCount = detectBeamCount(rawIntegral, width, height, first, second, spacing);
+    if (second.x - first.x > spacing * 4.6) continue;
+    const beamCount = detectBeamCount(clean, width, height, first, second, spacing);
     first.subdivisionCount = Math.max(first.subdivisionCount, beamCount);
     second.subdivisionCount = Math.max(second.subdivisionCount, beamCount);
   }
 
   kept.forEach((candidate) => {
+    if (!candidate.filled || candidate.dotted || candidate.subdivisionCount > 0) return;
     const spacing = staves[candidate.staffIndex].spacing;
-    candidate.dotted = detectAugmentationDot(
-      cleanIntegral,
-      width,
-      height,
-      candidate.x + spacing * 0.72,
-      candidate.y,
-      spacing,
-    );
+    candidate.subdivisionCount = detectFlagCount(cleanIntegral, width, height, candidate, spacing);
+  });
+
+  kept.forEach((candidate) => {
     candidate.beats = applyRhythmMarks(candidate.beats, candidate.subdivisionCount, candidate.dotted);
   });
   return kept;
@@ -698,12 +1055,12 @@ function detectRestCandidates(
   notes: NoteCandidate[],
 ) {
   const { width, height } = binary;
-  const cleanIntegral = integralImage(clean, width, height);
   const candidates: RestCandidate[] = [];
 
   staves.forEach((staff, staffIndex) => {
     const spacing = staff.spacing;
-    const startX = Math.max(staff.left + spacing * 6.2, width * 0.07);
+    const clefAndMeterWidth = staffIndex === 0 ? spacing * 6.2 : spacing * 4.05;
+    const startX = Math.max(staff.left + clefAndMeterWidth, width * 0.045);
     const endX = Math.min(staff.right - spacing, width * 0.98);
     const components = connectedComponents(clean, width, height, {
       x0: startX,
@@ -719,6 +1076,15 @@ function detectRestCandidates(
       const heightRatio = glyphHeight / spacing;
       const x = (component.x0 + component.x1) / 2;
       const y = (component.y0 + component.y1) / 2;
+      const barlineRun = longestVerticalRun(
+        clean,
+        width,
+        height,
+        Math.round(x),
+        Math.round(staff.lines[0] - spacing),
+        Math.round(staff.lines[4] + spacing),
+      );
+      if (barlineRun.length > spacing * 3.15) continue;
       const normalizedPixels = component.pixels / Math.max(1, spacing * spacing);
       if (normalizedPixels < 0.055 || normalizedPixels > 4.8) continue;
       if (heightRatio > 4.3 || widthRatio < 0.18 || widthRatio > 2.25) continue;
@@ -741,7 +1107,7 @@ function detectRestCandidates(
       });
       if (!classification) continue;
 
-      const dotted = detectAugmentationDot(cleanIntegral, width, height, component.x1, y, spacing);
+      const dotted = detectAugmentationDot(clean, width, height, component.x1, y, spacing);
       candidates.push({
         kind: "rest",
         staffIndex,
@@ -771,6 +1137,42 @@ function detectRestCandidates(
     if (!duplicate) kept.push(candidate);
   }
   return kept.sort((a, b) => a.staffIndex - b.staffIndex || a.x - b.x);
+}
+
+function detectScoreCandidates(binary: BinaryImage) {
+  const staves = detectStaves(binary);
+  if (staves.length === 0) return { staves, candidates: [] as Candidate[] };
+  const clean = removeStaffLines(binary, staves);
+  const notes = detectNoteCandidates(binary, clean, staves);
+  const rests = detectRestCandidates(binary, clean, staves, notes);
+  const candidates: Candidate[] = [...notes, ...rests]
+    .sort((a, b) => a.staffIndex - b.staffIndex || a.x - b.x)
+    .slice(0, 192);
+  return { staves, candidates };
+}
+
+export function recognizeBinaryScore(binary: BinaryImage): {
+  staffCount: number;
+  events: BinaryScoreEvent[];
+} {
+  const { staves, candidates } = detectScoreCandidates(binary);
+  return {
+    staffCount: staves.length,
+    events: candidates.map((candidate) => ({
+      kind: candidate.kind,
+      written: candidate.kind === "rest"
+        ? "休"
+        : pitchFromStaffStep(candidate.step, candidate.accidental),
+      beats: candidate.beats,
+      rhythmMark: candidate.dotted ? "dotted" : "plain",
+      staffIndex: candidate.staffIndex,
+      x: candidate.x,
+      y: candidate.y,
+      confidence: candidate.kind === "rest"
+        ? clamp(candidate.score, 0.46, 0.94)
+        : clamp(0.42 + candidate.score * 1.25, 0.46, 0.98),
+    })),
+  };
 }
 
 function annotatePreview(canvas: HTMLCanvasElement, staves: Staff[], candidates: Candidate[], notes: LessonNote[]) {
@@ -839,16 +1241,10 @@ export async function recognizeScoreImage(file: File): Promise<RecognitionResult
   context.setTransform(1, 0, 0, 1, 0, 0);
 
   const binary = binarize(corrected);
-  const staves = detectStaves(binary);
+  const { staves, candidates } = detectScoreCandidates(binary);
   if (staves.length === 0) {
     throw new Error("没有找到连续的五条谱线，请裁掉多余背景并保持照片水平后重试");
   }
-  const clean = removeStaffLines(binary, staves);
-  const noteCandidates = detectNoteCandidates(binary, clean, staves);
-  const restCandidates = detectRestCandidates(binary, clean, staves, noteCandidates);
-  const candidates: Candidate[] = [...noteCandidates, ...restCandidates]
-    .sort((a, b) => a.staffIndex - b.staffIndex || a.x - b.x)
-    .slice(0, 64);
   if (candidates.length === 0) {
     throw new Error("已找到五线谱，但没有可靠识别到音符或休止符，请换一张更清晰、对比度更高的照片");
   }
