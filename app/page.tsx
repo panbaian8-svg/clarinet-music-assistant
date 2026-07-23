@@ -4,6 +4,7 @@ import Image from "next/image";
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   buildLessonNote,
+  buildRestEvent,
   CLARINET_RANGE,
   DEMO_LESSON,
   type ClarinetRegister,
@@ -16,9 +17,13 @@ import { recognizeScoreImage, type RecognitionResult } from "./lib/score-recogni
 
 const beatLabels = ["1", "2", "3", "4"];
 const durationOptions = [
+  { beats: 0.25, label: "十六分音符／休止符 · ¼ 拍" },
   { beats: 0.5, label: "八分音符 · ½ 拍" },
+  { beats: 0.75, label: "附点八分音符／休止符 · ¾ 拍" },
   { beats: 1, label: "四分音符 · 1 拍" },
+  { beats: 1.5, label: "附点四分音符／休止符 · 1½ 拍" },
   { beats: 2, label: "二分音符 · 2 拍" },
+  { beats: 3, label: "附点二分音符／休止符 · 3 拍" },
   { beats: 4, label: "全音符 · 4 拍" },
 ];
 const registerTabs: Array<"全部" | ClarinetRegister> = ["全部", "低音区", "喉音区", "中音区", "高音区"];
@@ -35,6 +40,12 @@ function confidenceLabel(confidence: number) {
   if (confidence >= 0.82) return "高";
   if (confidence >= 0.66) return "中";
   return "待校对";
+}
+
+function RestSymbol({ restType, compact = false }: { restType: LessonNote["restType"]; compact?: boolean }) {
+  const symbols = { whole: "𝄻", half: "𝄼", quarter: "𝄽", eighth: "𝄾", sixteenth: "𝄿" };
+  const symbol = restType ? symbols[restType] : "𝄽";
+  return <span className={`rest-symbol ${compact ? "compact" : ""}`} aria-hidden="true">{symbol}</span>;
 }
 
 function ClarinetDiagram({ variant, compact = false }: { variant: FingeringVariant; compact?: boolean }) {
@@ -68,6 +79,7 @@ export default function Home() {
   const timersRef = useRef<number[]>([]);
 
   const selectedNote = lessonNotes[selectedIndex] ?? lessonNotes[0] ?? DEMO_LESSON[0];
+  const selectedFingering = selectedNote.kind === "note" ? selectedNote.fingering : null;
   const libraryEntry = CLARINET_RANGE.find((entry) => entry.value === libraryPitch) ?? CLARINET_RANGE[0];
   const libraryNote = buildLessonNote(libraryEntry.value, 1, { id: `library-${libraryEntry.value}`, source: "manual" });
   const filteredLibrary = useMemo(
@@ -148,11 +160,25 @@ export default function Home() {
     );
   };
 
+  const updateSelectedKind = (kind: LessonNote["kind"]) => {
+    setLessonNotes((notes) =>
+      notes.map((note, index) => {
+        if (index !== selectedIndex || note.kind === kind) return note;
+        const options = { id: note.id, confidence: 1, source: "manual" as const };
+        return kind === "rest"
+          ? buildRestEvent(note.beats, options)
+          : buildLessonNote("C4", note.beats, options);
+      }),
+    );
+  };
+
   const updateSelectedDuration = (beats: number) => {
     setLessonNotes((notes) =>
       notes.map((note, index) =>
         index === selectedIndex
-          ? buildLessonNote(note.written, beats, { id: note.id, confidence: note.confidence, source: "manual" })
+          ? note.kind === "rest"
+            ? buildRestEvent(beats, { id: note.id, confidence: note.confidence, source: "manual" })
+            : buildLessonNote(note.written, beats, { id: note.id, confidence: note.confidence, source: "manual" })
           : note,
       ),
     );
@@ -165,8 +191,15 @@ export default function Home() {
   };
 
   const addNoteAfterSelected = () => {
-    const note = buildLessonNote(selectedNote.written, 1, { source: "manual", confidence: 1 });
+    const written = selectedNote.kind === "note" ? selectedNote.written : "C4";
+    const note = buildLessonNote(written, 1, { source: "manual", confidence: 1 });
     setLessonNotes((notes) => [...notes.slice(0, selectedIndex + 1), note, ...notes.slice(selectedIndex + 1)]);
+    setSelectedIndex(selectedIndex + 1);
+  };
+
+  const addRestAfterSelected = () => {
+    const rest = buildRestEvent(1, { source: "manual", confidence: 1 });
+    setLessonNotes((notes) => [...notes.slice(0, selectedIndex + 1), rest, ...notes.slice(selectedIndex + 1)]);
     setSelectedIndex(selectedIndex + 1);
   };
 
@@ -233,7 +266,9 @@ export default function Home() {
       timersRef.current.push(
         window.setTimeout(() => {
           setSelectedIndex(index);
-          playTone(note.frequency, Math.max(0.22, (note.beats * beatMs * 0.82) / 1000));
+          if (note.kind === "note") {
+            playTone(note.frequency, Math.max(0.12, (note.beats * beatMs * 0.82) / 1000));
+          }
         }, cursor),
       );
       cursor += note.beats * beatMs;
@@ -310,13 +345,15 @@ export default function Home() {
                   <div className="sheet-title"><span>初学者练习 · 01</span><b>Andante</b></div>
                   <div className="staff">
                     <span className="clef" aria-hidden="true">𝄞</span><span className="time-signature">4<br />4</span>
-                    {DEMO_LESSON.map((note, index) => (
+                    {DEMO_LESSON.map((note, index) => note.kind === "rest" ? (
+                      <span className={`sheet-rest ${selectedIndex === index ? "current" : ""}`} key={note.id}><RestSymbol restType={note.restType} compact /></span>
+                    ) : (
                       <span className={`sheet-note ${selectedIndex === index ? "current" : ""}`} style={{ "--note-y": `${note.staffOffset}px` } as React.CSSProperties} key={note.id}>
-                        <i />{note.beats === 2 && <em />}
+                        <i />{note.beats >= 2 && <em />}
                       </span>
                     ))}
                   </div>
-                  <div className="sheet-footer"><span>C</span><span>D</span><span>E</span><span>F</span><span>G</span><span>A</span><span>G</span></div>
+                  <div className="sheet-footer"><span>C</span><span>D</span><span>休</span><span>E</span><span>F</span><span>G</span><span>A</span></div>
                 </div>
               )}
               <input ref={fileInputRef} className="sr-only" type="file" accept="image/png,image/jpeg,image/webp" onChange={handleFileChange} aria-label="上传五线谱照片" />
@@ -334,14 +371,14 @@ export default function Home() {
               <span className="button-icon" aria-hidden="true">{isAnalyzing ? "···" : "◎"}</span>
               <span>
                 <b>{isAnalyzing ? "正在校正谱线并寻找音符…" : uploadedFile ? "开始识别这张谱面" : "使用示例进入课堂"}</b>
-                <small>{uploadedFile ? "识别音高、升降号与基础时值" : "C–D–E–F–G 基础练习"}</small>
+                <small>{uploadedFile ? "识别音高、附点、连梁与休止符" : "含休止、附点与十六分音符的示例"}</small>
               </span>
               <i aria-hidden="true">→</i>
             </button>
 
             {recognition && (
               <div className="recognition-report" role="status">
-                <div><span className="report-check">✓</span><b>识别完成</b><small>{recognition.staffCount} 组五线谱 · {recognition.notes.length} 个音符</small></div>
+                <div><span className="report-check">✓</span><b>识别完成</b><small>{recognition.staffCount} 组五线谱 · {recognition.notes.length - recognition.restCount} 个音符 · {recognition.restCount} 个休止符 · {recognition.dottedCount} 个附点 · {recognition.subdivisionCount} 个连梁细分音符</small></div>
                 <div className="confidence-meter"><span style={{ width: `${recognition.confidence * 100}%` }} /><b>{Math.round(recognition.confidence * 100)}%</b></div>
                 <p>{recognition.warning} 已自动校正 {Math.abs(recognition.deskewDegrees).toFixed(1)}° 倾斜。</p>
               </div>
@@ -351,31 +388,38 @@ export default function Home() {
 
           <article className="fingering-panel panel">
             <div className="panel-title-row">
-              <div><span className="panel-number coral">B</span><div><h3>当前音符</h3><p>降 B 调 Boehm 制式 · 谱面记音</p></div></div>
-              <button className="listen-small" type="button" onClick={() => playTone(selectedNote.frequency)} aria-label={`试听 ${selectedNote.written}`}><span aria-hidden="true">▶</span>试听</button>
+              <div><span className="panel-number coral">B</span><div><h3>{selectedNote.kind === "rest" ? "当前休止符" : "当前音符"}</h3><p>{selectedNote.kind === "rest" ? "保持拍子 · 不发音" : "降 B 调 Boehm 制式 · 谱面记音"}</p></div></div>
+              <button className="listen-small" type="button" disabled={selectedNote.kind === "rest"} onClick={() => selectedNote.kind === "note" && playTone(selectedNote.frequency)} aria-label={selectedNote.kind === "note" ? `试听 ${selectedNote.written}` : "休止符不发音"}><span aria-hidden="true">▶</span>{selectedNote.kind === "rest" ? "静音" : "试听"}</button>
             </div>
 
             <div className="note-summary">
-              <div className="note-identity"><span className="solfege">{selectedNote.solfege}</span><strong>{noteHead(selectedNote.written)}</strong><span className="octave">{noteOctave(selectedNote.written)}</span></div>
+              <div className={`note-identity ${selectedNote.kind === "rest" ? "rest-identity" : ""}`}><span className="solfege">{selectedNote.solfege}</span>{selectedNote.kind === "rest" ? <RestSymbol restType={selectedNote.restType} /> : <><strong>{noteHead(selectedNote.written)}</strong><span className="octave">{noteOctave(selectedNote.written)}</span></>}</div>
               <div className="note-facts">
                 <div><span>实际听到</span><b>{selectedNote.sounding}</b></div>
                 <div><span>时值</span><b>{selectedNote.beats} 拍 · {selectedNote.rhythm}</b></div>
               </div>
             </div>
 
-            <div className="fingering-card multi-fingering-card">
-              <div className="fingering-copy">
-                <span className="mini-label">FINGERING / {selectedNote.fingering.register}</span>
-                <h4>{selectedNote.fingering.name}</h4>
-                <p>{selectedNote.fingering.tip}</p>
-                <div className="finger-legend"><span><i className="closed" />按下／联动闭合</span><span><i className="mechanism" />机构定位</span><span><i />开放</span></div>
-                <div className="standard-chart-note"><b>标准键位图</b><span>下管的小拇指弯曲键组与直列键组均按 Yamaha 原图呈现，不再用抽象方块代替。</span></div>
-                <a className="library-jump" href="#fingering-library">查看 42 音 · 61 套分开指法 →</a>
+            {selectedFingering ? (
+              <div className="fingering-card multi-fingering-card">
+                <div className="fingering-copy">
+                  <span className="mini-label">FINGERING / {selectedFingering.register}</span>
+                  <h4>{selectedFingering.name}</h4>
+                  <p>{selectedFingering.tip}</p>
+                  <div className="finger-legend"><span><i className="closed" />按下／联动闭合</span><span><i className="mechanism" />机构定位</span><span><i />开放</span></div>
+                  <div className="standard-chart-note"><b>标准键位图</b><span>下管的小拇指弯曲键组与直列键组均按 Yamaha 原图呈现，不再用抽象方块代替。</span></div>
+                  <a className="library-jump" href="#fingering-library">查看 42 音 · 61 套分开指法 →</a>
+                </div>
+                <div className="current-variant-grid" role="list" aria-label={`${selectedNote.written} 的全部指法`}>
+                  {selectedFingering.variants.map((variant) => <ClarinetDiagram variant={variant} key={variant.id} />)}
+                </div>
               </div>
-              <div className="current-variant-grid" role="list" aria-label={`${selectedNote.written} 的全部指法`}>
-                {selectedNote.fingering.variants.map((variant) => <ClarinetDiagram variant={variant} key={variant.id} />)}
+            ) : (
+              <div className="rest-detail-card">
+                <RestSymbol restType={selectedNote.restType} />
+                <div><span className="mini-label">RHYTHM / REST</span><h4>{selectedNote.rhythm}</h4><p>休止期间保持气息准备和拍点感，不按键、不发音；到下一个音再统一落指并起音。</p></div>
               </div>
-            </div>
+            )}
 
             <div className="teacher-tip"><span aria-hidden="true">!</span><p><b>老师提示</b> 高音区除了指法，还依赖正确口型和气流；网站给出的是标准起始指法。</p></div>
           </article>
@@ -391,26 +435,28 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="note-timeline" role="list" aria-label="识别出的音符序列">
+          <div className="note-timeline" role="list" aria-label="识别出的音符与休止符序列">
             {lessonNotes.map((note, index) => (
-              <button type="button" role="listitem" className={`timeline-note ${selectedIndex === index ? "selected" : ""}`} key={note.id} onClick={() => { stopLesson(); setSelectedIndex(index); playTone(note.frequency); }} aria-current={selectedIndex === index ? "true" : undefined}>
+              <button type="button" role="listitem" className={`timeline-note ${note.kind === "rest" ? "rest-event" : ""} ${selectedIndex === index ? "selected" : ""}`} key={note.id} onClick={() => { stopLesson(); setSelectedIndex(index); if (note.kind === "note") playTone(note.frequency); }} aria-current={selectedIndex === index ? "true" : undefined}>
                 <span className="timeline-index">{String(index + 1).padStart(2, "0")}</span>
                 <span className={`note-confidence level-${confidenceLabel(note.confidence)}`}>{confidenceLabel(note.confidence)}</span>
-                <strong>{noteHead(note.written)}</strong><small>{noteOctave(note.written)} · {note.beats} 拍</small>
+                {note.kind === "rest" ? <strong><RestSymbol restType={note.restType} compact /></strong> : <strong>{noteHead(note.written)}</strong>}<small>{note.kind === "rest" ? note.rhythm : `${noteOctave(note.written)} · ${note.rhythm}`}</small>
                 <span className={`beat-bars beats-${String(note.beats).replace(".", "-")}`} aria-label={`${note.beats} 拍`}><i /><i /><i /><i /></span>
               </button>
             ))}
           </div>
 
-          <div className="note-editor" aria-label="校对当前音符">
-            <div><span className="editor-kicker">校对第 {selectedIndex + 1} 个音</span><b>老师确认后再练习</b></div>
-            <label><span>谱面音</span><select value={CLARINET_RANGE.find((entry) => entry.fingering.sourceIndex === selectedNote.fingering.sourceIndex)?.value ?? selectedNote.written} onChange={(event) => updateSelectedPitch(event.target.value)}>{CLARINET_RANGE.map((entry) => <option value={entry.value} key={entry.value}>{entry.label}</option>)}</select></label>
+          <div className="note-editor" aria-label="校对当前音符或休止符">
+            <div><span className="editor-kicker">校对第 {selectedIndex + 1} 个事件</span><b>老师确认后再练习</b></div>
+            <label><span>类型</span><select value={selectedNote.kind} onChange={(event) => updateSelectedKind(event.target.value as LessonNote["kind"])}><option value="note">音符</option><option value="rest">休止符</option></select></label>
+            <label><span>谱面音</span><select disabled={selectedNote.kind === "rest"} value={selectedNote.kind === "note" ? CLARINET_RANGE.find((entry) => entry.fingering.sourceIndex === selectedNote.fingering.sourceIndex)?.value ?? selectedNote.written : "C4"} onChange={(event) => updateSelectedPitch(event.target.value)}>{CLARINET_RANGE.map((entry) => <option value={entry.value} key={entry.value}>{entry.label}</option>)}</select></label>
             <label><span>时值</span><select value={selectedNote.beats} onChange={(event) => updateSelectedDuration(Number(event.target.value))}>{durationOptions.map((option) => <option value={option.beats} key={option.beats}>{option.label}</option>)}</select></label>
             <button type="button" className="edit-action add" onClick={addNoteAfterSelected}>＋ 补一个音</button>
+            <button type="button" className="edit-action rest" onClick={addRestAfterSelected}>＋ 补休止</button>
             <button type="button" className="edit-action remove" onClick={removeSelectedNote} disabled={lessonNotes.length <= 1}>删除</button>
           </div>
 
-          <div className="rhythm-guide"><span>四拍脉冲</span><div>{beatLabels.map((beat) => <i key={beat}><b>{beat}</b></i>)}</div><p>八分音符会占半拍；播放时橙色音符会自动前进。</p></div>
+          <div className="rhythm-guide"><span>四拍脉冲</span><div>{beatLabels.map((beat) => <i key={beat}><b>{beat}</b></i>)}</div><p>支持十六分、八分、附点、连梁细分与全／二分／四分／八分／十六分休止；休止段只推进拍点，不发音。</p></div>
         </article>
       </section>
 
@@ -460,7 +506,7 @@ export default function Home() {
 
       <section className="teacher-note-section" id="teacher-note">
         <div className="teacher-note-card"><span className="section-index">04 / TEACHER&apos;S NOTE</span><blockquote>“机器负责找得快，老师负责教得准；<br />学生负责慢慢把每个音吹稳。”</blockquote><div className="note-signature"><span />音乐助教 · 识谱工作流</div></div>
-        <div className="next-up"><span>NEXT</span><h3>下一阶段</h3><ul><li>跟吹录音与音准判断</li><li>复杂节奏与休止符识别</li><li>多声部与调号语义分析</li></ul></div>
+        <div className="next-up"><span>NEXT</span><h3>下一阶段</h3><ul><li>跟吹录音与音准判断</li><li>三连音与跨小节连音线</li><li>多声部与调号语义分析</li></ul></div>
       </section>
 
       <footer>

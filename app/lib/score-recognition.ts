@@ -1,4 +1,9 @@
-import { buildLessonNote, type LessonNote } from "./clarinet";
+import {
+  buildLessonNote,
+  buildRestEvent,
+  type LessonNote,
+  type RestType,
+} from "./clarinet";
 
 export type RecognitionResult = {
   notes: LessonNote[];
@@ -7,6 +12,9 @@ export type RecognitionResult = {
   deskewDegrees: number;
   previewDataUrl: string;
   warning: string | null;
+  restCount: number;
+  dottedCount: number;
+  subdivisionCount: number;
 };
 
 type Staff = {
@@ -16,7 +24,8 @@ type Staff = {
   right: number;
 };
 
-type Candidate = {
+type NoteCandidate = {
+  kind: "note";
   staffIndex: number;
   x: number;
   y: number;
@@ -27,6 +36,34 @@ type Candidate = {
   stemTop: number;
   beats: number;
   accidental: "♯" | "♭" | "";
+  dotted: boolean;
+  subdivisionCount: number;
+  stemX: number;
+};
+
+type RestCandidate = {
+  kind: "rest";
+  staffIndex: number;
+  x: number;
+  y: number;
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  score: number;
+  beats: number;
+  dotted: boolean;
+  restType: RestType;
+};
+
+type Candidate = NoteCandidate | RestCandidate;
+
+export type RestGlyphFeatures = {
+  widthRatio: number;
+  heightRatio: number;
+  centerOffset: number;
+  density: number;
+  lobeCount: number;
 };
 
 type BinaryImage = {
@@ -38,6 +75,58 @@ type BinaryImage = {
 
 const clamp = (value: number, min: number, max: number) =>
   Math.max(min, Math.min(max, value));
+
+export function applyRhythmMarks(baseBeats: number, subdivisionCount: number, dotted: boolean) {
+  const subdivided = subdivisionCount > 0 ? 1 / Math.pow(2, subdivisionCount) : baseBeats;
+  return subdivided * (dotted ? 1.5 : 1);
+}
+
+export function classifyRestGlyph(features: RestGlyphFeatures): {
+  restType: RestType;
+  beats: number;
+  confidence: number;
+} | null {
+  const { widthRatio, heightRatio, centerOffset, density, lobeCount } = features;
+  if (density < 0.055 || density > 0.92) return null;
+
+  if (
+    widthRatio >= 0.5 && widthRatio <= 2.15 &&
+    heightRatio >= 0.12 && heightRatio <= 0.82 &&
+    centerOffset >= -1.35 && centerOffset <= 0.35
+  ) {
+    const whole = centerOffset < -0.48;
+    return {
+      restType: whole ? "whole" : "half",
+      beats: whole ? 4 : 2,
+      confidence: clamp(0.76 - Math.abs(widthRatio - 1.1) * 0.08, 0.58, 0.9),
+    };
+  }
+
+  if (
+    widthRatio >= 0.5 && widthRatio <= 1.95 &&
+    heightRatio >= 2.05 && heightRatio <= 3.95 &&
+    lobeCount >= 3
+  ) {
+    return { restType: "sixteenth", beats: 0.25, confidence: clamp(0.58 + lobeCount * 0.05, 0.62, 0.86) };
+  }
+
+  if (
+    widthRatio >= 0.4 && widthRatio <= 1.85 &&
+    heightRatio >= 1.05 && heightRatio <= 2.55 &&
+    lobeCount <= 2
+  ) {
+    return { restType: "eighth", beats: 0.5, confidence: clamp(0.74 - Math.abs(heightRatio - 1.75) * 0.08, 0.6, 0.86) };
+  }
+
+  if (
+    widthRatio >= 0.34 && widthRatio <= 1.55 &&
+    heightRatio >= 1.75 && heightRatio <= 4.15
+  ) {
+    return { restType: "quarter", beats: 1, confidence: clamp(0.7 - Math.abs(widthRatio - 0.85) * 0.08, 0.56, 0.82) };
+  }
+
+  return null;
+}
 
 function makeCanvas(width: number, height: number) {
   const canvas = document.createElement("canvas");
@@ -268,6 +357,105 @@ function rectangleSum(
   );
 }
 
+type GlyphComponent = {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  pixels: number;
+};
+
+function connectedComponents(
+  data: Uint8Array,
+  width: number,
+  height: number,
+  bounds: { x0: number; y0: number; x1: number; y1: number },
+) {
+  const left = clamp(Math.floor(bounds.x0), 0, width - 1);
+  const top = clamp(Math.floor(bounds.y0), 0, height - 1);
+  const right = clamp(Math.ceil(bounds.x1), 0, width - 1);
+  const bottom = clamp(Math.ceil(bounds.y1), 0, height - 1);
+  const seen = new Uint8Array(width * height);
+  const components: GlyphComponent[] = [];
+  const queueX: number[] = [];
+  const queueY: number[] = [];
+
+  for (let y = top; y <= bottom; y += 1) {
+    for (let x = left; x <= right; x += 1) {
+      const start = y * width + x;
+      if (!data[start] || seen[start]) continue;
+      seen[start] = 1;
+      queueX.length = 0;
+      queueY.length = 0;
+      queueX.push(x);
+      queueY.push(y);
+      let cursor = 0;
+      let minX = x;
+      let maxX = x;
+      let minY = y;
+      let maxY = y;
+      let pixels = 0;
+      while (cursor < queueX.length) {
+        const currentX = queueX[cursor];
+        const currentY = queueY[cursor];
+        cursor += 1;
+        pixels += 1;
+        minX = Math.min(minX, currentX);
+        maxX = Math.max(maxX, currentX);
+        minY = Math.min(minY, currentY);
+        maxY = Math.max(maxY, currentY);
+        const neighbors = [
+          [currentX - 1, currentY],
+          [currentX + 1, currentY],
+          [currentX, currentY - 1],
+          [currentX, currentY + 1],
+        ];
+        for (const [nextX, nextY] of neighbors) {
+          if (nextX < left || nextX > right || nextY < top || nextY > bottom) continue;
+          const next = nextY * width + nextX;
+          if (!data[next] || seen[next]) continue;
+          seen[next] = 1;
+          queueX.push(nextX);
+          queueY.push(nextY);
+        }
+      }
+      components.push({ x0: minX, y0: minY, x1: maxX, y1: maxY, pixels });
+    }
+  }
+  return components;
+}
+
+function countProjectionLobes(data: Uint8Array, width: number, component: GlyphComponent) {
+  const glyphWidth = Math.max(1, component.x1 - component.x0 + 1);
+  let lobes = 0;
+  let active = false;
+  for (let y = component.y0; y <= component.y1; y += 1) {
+    let rowInk = 0;
+    for (let x = component.x0; x <= component.x1; x += 1) rowInk += data[y * width + x];
+    const rowActive = rowInk >= Math.max(2, glyphWidth * 0.42);
+    if (rowActive && !active) lobes += 1;
+    active = rowActive;
+  }
+  return lobes;
+}
+
+function detectAugmentationDot(
+  integral: Uint32Array,
+  width: number,
+  height: number,
+  rightEdge: number,
+  y: number,
+  spacing: number,
+) {
+  const x0 = rightEdge + spacing * 0.42;
+  const x1 = rightEdge + spacing * 1.45;
+  const y0 = y - spacing * 0.48;
+  const y1 = y + spacing * 0.48;
+  const ink = rectangleSum(integral, width, height, x0, y0, x1, y1);
+  const normalizedInk = ink / Math.max(1, spacing * spacing);
+  return normalizedInk >= 0.035 && normalizedInk <= 0.32;
+}
+
 function longestVerticalRun(data: Uint8Array, width: number, height: number, x: number, y0: number, y1: number) {
   let longest = 0;
   let current = 0;
@@ -319,6 +507,59 @@ function detectAccidental(
   return "";
 }
 
+function detectFlagCount(
+  integral: Uint32Array,
+  width: number,
+  height: number,
+  candidate: NoteCandidate,
+  spacing: number,
+) {
+  const direction = candidate.stemUp ? 1 : -1;
+  const left = candidate.stemX - spacing * 0.3;
+  const right = candidate.stemX + spacing * 1.4;
+  const bandInk = (offset: number) =>
+    rectangleSum(
+      integral,
+      width,
+      height,
+      left,
+      candidate.stemTop + direction * spacing * (offset - 0.22),
+      right,
+      candidate.stemTop + direction * spacing * (offset + 0.22),
+    ) / Math.max(1, spacing * spacing);
+  const first = bandInk(0.38);
+  const second = bandInk(0.92);
+  if (first > 0.24 && second > 0.18) return 2;
+  if (first > 0.2) return 1;
+  return 0;
+}
+
+function detectBeamCount(
+  integral: Uint32Array,
+  width: number,
+  height: number,
+  first: NoteCandidate,
+  second: NoteCandidate,
+  spacing: number,
+) {
+  if (first.stemUp !== second.stemUp) return 0;
+  const left = Math.min(first.stemX, second.stemX);
+  const right = Math.max(first.stemX, second.stemX);
+  if (right - left < spacing * 0.65) return 0;
+  const direction = first.stemUp ? 1 : -1;
+  const endpointMin = Math.min(first.stemTop, second.stemTop);
+  const endpointMax = Math.max(first.stemTop, second.stemTop);
+  const stripRatio = (offset: number) => {
+    const top = endpointMin + direction * spacing * offset - spacing * 0.2;
+    const bottom = endpointMax + direction * spacing * offset + spacing * 0.2;
+    const ink = rectangleSum(integral, width, height, left, top, right, bottom);
+    const area = Math.max(1, (right - left) * Math.max(spacing * 0.4, bottom - top));
+    return ink / area;
+  };
+  if (stripRatio(0) < 0.25) return 0;
+  return stripRatio(0.62) > 0.24 ? 2 : 1;
+}
+
 export function pitchFromStaffStep(step: number, accidental: "♯" | "♭" | "") {
   const letters = ["C", "D", "E", "F", "G", "A", "B"];
   const absoluteDiatonic = 4 * 7 + 2 + step;
@@ -327,11 +568,11 @@ export function pitchFromStaffStep(step: number, accidental: "♯" | "♭" | "")
   return `${letter}${accidental}${octave}`;
 }
 
-function detectCandidates(binary: BinaryImage, clean: Uint8Array, staves: Staff[]) {
+function detectNoteCandidates(binary: BinaryImage, clean: Uint8Array, staves: Staff[]) {
   const { width, height, data } = binary;
   const cleanIntegral = integralImage(clean, width, height);
   const rawIntegral = integralImage(data, width, height);
-  const candidates: Candidate[] = [];
+  const candidates: NoteCandidate[] = [];
 
   staves.forEach((staff, staffIndex) => {
     const spacing = staff.spacing;
@@ -385,6 +626,7 @@ function detectCandidates(binary: BinaryImage, clean: Uint8Array, staves: Staff[
         const beats = filled ? 1 : hasStem ? 2 : 4;
         const accidental = detectAccidental(rawIntegral, data, width, height, current.x, y, spacing);
         candidates.push({
+          kind: "note",
           staffIndex,
           x: current.x,
           y,
@@ -395,13 +637,16 @@ function detectCandidates(binary: BinaryImage, clean: Uint8Array, staves: Staff[
           stemTop: stemUp ? stem.start : stem.end,
           beats,
           accidental,
+          dotted: false,
+          subdivisionCount: 0,
+          stemX: current.x + (stemUp ? rx : -rx),
         });
       }
     }
   });
 
   candidates.sort((a, b) => b.score - a.score);
-  const kept: Candidate[] = [];
+  const kept: NoteCandidate[] = [];
   for (const candidate of candidates) {
     const spacing = staves[candidate.staffIndex].spacing;
     const duplicate = kept.some(
@@ -414,29 +659,118 @@ function detectCandidates(binary: BinaryImage, clean: Uint8Array, staves: Staff[
   }
   kept.sort((a, b) => a.staffIndex - b.staffIndex || a.x - b.x);
 
+  kept.forEach((candidate) => {
+    if (!candidate.filled) return;
+    const spacing = staves[candidate.staffIndex].spacing;
+    candidate.subdivisionCount = detectFlagCount(rawIntegral, width, height, candidate, spacing);
+  });
+
   for (let index = 0; index < kept.length - 1; index += 1) {
     const first = kept[index];
     const second = kept[index + 1];
     if (!first.filled || !second.filled || first.staffIndex !== second.staffIndex) continue;
     const spacing = staves[first.staffIndex].spacing;
     if (second.x - first.x > spacing * 5.2) continue;
-    const beamY = first.stemUp ? Math.min(first.stemTop, second.stemTop) : Math.max(first.stemTop, second.stemTop);
-    const beamInk = rectangleSum(
-      rawIntegral,
+    const beamCount = detectBeamCount(rawIntegral, width, height, first, second, spacing);
+    first.subdivisionCount = Math.max(first.subdivisionCount, beamCount);
+    second.subdivisionCount = Math.max(second.subdivisionCount, beamCount);
+  }
+
+  kept.forEach((candidate) => {
+    const spacing = staves[candidate.staffIndex].spacing;
+    candidate.dotted = detectAugmentationDot(
+      cleanIntegral,
       width,
       height,
-      first.x,
-      beamY - spacing * 0.24,
-      second.x,
-      beamY + spacing * 0.24,
+      candidate.x + spacing * 0.72,
+      candidate.y,
+      spacing,
     );
-    const beamArea = Math.max(1, (second.x - first.x) * spacing * 0.48);
-    if (beamInk / beamArea > 0.42) {
-      first.beats = 0.5;
-      second.beats = 0.5;
-    }
-  }
+    candidate.beats = applyRhythmMarks(candidate.beats, candidate.subdivisionCount, candidate.dotted);
+  });
   return kept;
+}
+
+function detectRestCandidates(
+  binary: BinaryImage,
+  clean: Uint8Array,
+  staves: Staff[],
+  notes: NoteCandidate[],
+) {
+  const { width, height } = binary;
+  const cleanIntegral = integralImage(clean, width, height);
+  const candidates: RestCandidate[] = [];
+
+  staves.forEach((staff, staffIndex) => {
+    const spacing = staff.spacing;
+    const startX = Math.max(staff.left + spacing * 6.2, width * 0.07);
+    const endX = Math.min(staff.right - spacing, width * 0.98);
+    const components = connectedComponents(clean, width, height, {
+      x0: startX,
+      y0: staff.lines[0] - spacing * 2.1,
+      x1: endX,
+      y1: staff.lines[4] + spacing * 2.1,
+    });
+
+    for (const component of components) {
+      const glyphWidth = component.x1 - component.x0 + 1;
+      const glyphHeight = component.y1 - component.y0 + 1;
+      const widthRatio = glyphWidth / spacing;
+      const heightRatio = glyphHeight / spacing;
+      const x = (component.x0 + component.x1) / 2;
+      const y = (component.y0 + component.y1) / 2;
+      const normalizedPixels = component.pixels / Math.max(1, spacing * spacing);
+      if (normalizedPixels < 0.055 || normalizedPixels > 4.8) continue;
+      if (heightRatio > 4.3 || widthRatio < 0.18 || widthRatio > 2.25) continue;
+
+      const overlapsNote = notes.some(
+        (note) =>
+          note.staffIndex === staffIndex &&
+          Math.abs(note.x - x) < spacing * 2.05 &&
+          Math.abs(note.y - y) < spacing * 3.65,
+      );
+      if (overlapsNote) continue;
+
+      const area = Math.max(1, glyphWidth * glyphHeight);
+      const classification = classifyRestGlyph({
+        widthRatio,
+        heightRatio,
+        centerOffset: (y - staff.lines[2]) / spacing,
+        density: component.pixels / area,
+        lobeCount: countProjectionLobes(clean, width, component),
+      });
+      if (!classification) continue;
+
+      const dotted = detectAugmentationDot(cleanIntegral, width, height, component.x1, y, spacing);
+      candidates.push({
+        kind: "rest",
+        staffIndex,
+        x,
+        y,
+        x0: component.x0,
+        y0: component.y0,
+        x1: component.x1,
+        y1: component.y1,
+        score: classification.confidence,
+        beats: classification.beats * (dotted ? 1.5 : 1),
+        dotted,
+        restType: classification.restType,
+      });
+    }
+  });
+
+  candidates.sort((a, b) => b.score - a.score);
+  const kept: RestCandidate[] = [];
+  for (const candidate of candidates) {
+    const spacing = staves[candidate.staffIndex].spacing;
+    const duplicate = kept.some(
+      (existing) =>
+        existing.staffIndex === candidate.staffIndex &&
+        Math.abs(existing.x - candidate.x) < spacing * 1.35,
+    );
+    if (!duplicate) kept.push(candidate);
+  }
+  return kept.sort((a, b) => a.staffIndex - b.staffIndex || a.x - b.x);
 }
 
 function annotatePreview(canvas: HTMLCanvasElement, staves: Staff[], candidates: Candidate[], notes: LessonNote[]) {
@@ -460,10 +794,21 @@ function annotatePreview(canvas: HTMLCanvasElement, staves: Staff[], candidates:
   context.setLineDash([]);
   candidates.forEach((candidate, index) => {
     const spacing = staves[candidate.staffIndex].spacing;
-    context.strokeStyle = "#e9684a";
-    context.fillStyle = "#e9684a";
-    context.strokeRect(candidate.x - spacing, candidate.y - spacing * 0.72, spacing * 2, spacing * 1.44);
-    context.fillText(notes[index]?.written ?? "?", candidate.x - spacing, candidate.y - spacing * 0.88);
+    const isRest = candidate.kind === "rest";
+    context.strokeStyle = isRest ? "#337f9e" : "#e9684a";
+    context.fillStyle = isRest ? "#337f9e" : "#e9684a";
+    if (isRest) {
+      context.strokeRect(
+        candidate.x0 - spacing * 0.28,
+        candidate.y0 - spacing * 0.28,
+        candidate.x1 - candidate.x0 + spacing * 0.56,
+        candidate.y1 - candidate.y0 + spacing * 0.56,
+      );
+    } else {
+      context.strokeRect(candidate.x - spacing, candidate.y - spacing * 0.72, spacing * 2, spacing * 1.44);
+    }
+    const label = notes[index]?.kind === "rest" ? "休" : notes[index]?.written ?? "?";
+    context.fillText(label, candidate.x - spacing, candidate.y - spacing * 0.88);
   });
   context.restore();
   return canvas.toDataURL("image/jpeg", 0.9);
@@ -499,12 +844,24 @@ export async function recognizeScoreImage(file: File): Promise<RecognitionResult
     throw new Error("没有找到连续的五条谱线，请裁掉多余背景并保持照片水平后重试");
   }
   const clean = removeStaffLines(binary, staves);
-  const candidates = detectCandidates(binary, clean, staves).slice(0, 64);
+  const noteCandidates = detectNoteCandidates(binary, clean, staves);
+  const restCandidates = detectRestCandidates(binary, clean, staves, noteCandidates);
+  const candidates: Candidate[] = [...noteCandidates, ...restCandidates]
+    .sort((a, b) => a.staffIndex - b.staffIndex || a.x - b.x)
+    .slice(0, 64);
   if (candidates.length === 0) {
-    throw new Error("已找到五线谱，但没有可靠识别到音符，请换一张更清晰、对比度更高的照片");
+    throw new Error("已找到五线谱，但没有可靠识别到音符或休止符，请换一张更清晰、对比度更高的照片");
   }
 
   const notes = candidates.map((candidate, index) => {
+    if (candidate.kind === "rest") {
+      return buildRestEvent(candidate.beats, {
+        id: `recognized-${index}-rest`,
+        confidence: clamp(candidate.score, 0.46, 0.94),
+        source: "recognized",
+        restType: candidate.restType,
+      });
+    }
     const written = pitchFromStaffStep(candidate.step, candidate.accidental);
     const confidence = clamp(0.42 + candidate.score * 1.25, 0.46, 0.98);
     return buildLessonNote(written, candidate.beats, {
@@ -514,10 +871,15 @@ export async function recognizeScoreImage(file: File): Promise<RecognitionResult
     });
   });
   const confidence = notes.reduce((sum, note) => sum + note.confidence, 0) / notes.length;
+  const restCount = candidates.filter((candidate) => candidate.kind === "rest").length;
+  const dottedCount = candidates.filter((candidate) => candidate.dotted).length;
+  const subdivisionCount = candidates.filter(
+    (candidate) => candidate.kind === "note" && candidate.subdivisionCount > 0,
+  ).length;
   const warning =
     notes.some((note) => note.confidence < 0.66)
-      ? "部分音符置信度较低，请在下方逐音校对后再开始课堂练习。"
-      : "识别结果仍建议由老师快速核对，尤其是升降号与八分音符。";
+      ? "部分节奏符号置信度较低，请在下方逐项校对后再开始课堂练习。"
+      : "识别结果仍建议由老师快速核对，尤其是附点、连梁分组与休止符。";
 
   return {
     notes,
@@ -526,5 +888,8 @@ export async function recognizeScoreImage(file: File): Promise<RecognitionResult
     deskewDegrees,
     previewDataUrl: annotatePreview(corrected, staves, candidates, notes),
     warning,
+    restCount,
+    dottedCount,
+    subdivisionCount,
   };
 }

@@ -27,6 +27,9 @@ test("server-renders the Music Teaching Assistant workspace", async () => {
   assert.match(html, /上传谱面照片/);
   assert.match(html, /当前音符/);
   assert.match(html, /识别结果与逐拍练习/);
+  assert.match(html, /休止符/);
+  assert.match(html, /附点/);
+  assert.match(html, /十六分/);
   assert.match(html, /本地识谱已启用/);
   assert.match(html, /完整单簧管指法库/);
   assert.match(html, /E3–A6/);
@@ -54,6 +57,10 @@ test("ships local recognition, correction tools, and the complete fingering data
   assert.match(recognizer, /estimateSkew/);
   assert.match(recognizer, /detectStaves/);
   assert.match(recognizer, /detectAccidental/);
+  assert.match(recognizer, /detectRestCandidates/);
+  assert.match(recognizer, /classifyRestGlyph/);
+  assert.match(recognizer, /detectBeamCount/);
+  assert.match(recognizer, /detectAugmentationDot/);
   assert.doesNotMatch(recognizer, /fetch\(|XMLHttpRequest|OPENAI_API_KEY/);
   assert.match(fingerings, /Array\.from\(\{ length: 42 \}/);
   assert.match(fingerings, /TOTAL_FINGERING_VARIANTS/);

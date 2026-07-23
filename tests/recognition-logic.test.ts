@@ -5,8 +5,14 @@ import {
   CLARINET_RANGE,
   TOTAL_FINGERING_VARIANTS,
   buildLessonNote,
+  buildRestEvent,
 } from "../app/lib/clarinet";
-import { detectStaves, pitchFromStaffStep } from "../app/lib/score-recognition";
+import {
+  applyRhythmMarks,
+  classifyRestGlyph,
+  detectStaves,
+  pitchFromStaffStep,
+} from "../app/lib/score-recognition";
 
 test("detects one evenly spaced five-line staff", () => {
   const width = 400;
@@ -39,4 +45,28 @@ test("covers 42 pitches and all 61 separated Yamaha fingering charts", () => {
   assert.equal(CLARINET_RANGE[0].fingering.sourceIndex, 1);
   assert.equal(CLARINET_RANGE[CLARINET_RANGE.length - 1].fingering.sourceIndex, 42);
   assert.equal(buildLessonNote("C4").sounding, "B♭3");
+});
+
+test("applies beam subdivisions and augmentation dots", () => {
+  assert.equal(applyRhythmMarks(1, 2, false), 0.25);
+  assert.equal(applyRhythmMarks(1, 1, false), 0.5);
+  assert.equal(applyRhythmMarks(1, 1, true), 0.75);
+  assert.equal(applyRhythmMarks(2, 0, true), 3);
+});
+
+test("classifies the five supported rest families", () => {
+  assert.equal(classifyRestGlyph({ widthRatio: 1.1, heightRatio: 0.4, centerOffset: -0.8, density: 0.4, lobeCount: 1 })?.restType, "whole");
+  assert.equal(classifyRestGlyph({ widthRatio: 1.1, heightRatio: 0.4, centerOffset: 0, density: 0.4, lobeCount: 1 })?.restType, "half");
+  assert.equal(classifyRestGlyph({ widthRatio: 0.8, heightRatio: 3, centerOffset: 0, density: 0.3, lobeCount: 1 })?.restType, "quarter");
+  assert.equal(classifyRestGlyph({ widthRatio: 0.8, heightRatio: 1.7, centerOffset: 0, density: 0.3, lobeCount: 2 })?.restType, "eighth");
+  assert.equal(classifyRestGlyph({ widthRatio: 0.9, heightRatio: 3, centerOffset: 0, density: 0.3, lobeCount: 4 })?.restType, "sixteenth");
+});
+
+test("builds silent rest events for the editable timeline", () => {
+  const rest = buildRestEvent(0.75, { id: "test-rest", source: "recognized" });
+  assert.equal(rest.kind, "rest");
+  assert.equal(rest.restType, "eighth");
+  assert.equal(rest.rhythm, "附点八分休止符");
+  assert.equal(rest.frequency, 0);
+  assert.equal(rest.fingering, null);
 });

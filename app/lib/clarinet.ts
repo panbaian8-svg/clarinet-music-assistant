@@ -19,7 +19,10 @@ export type Fingering = {
   sourceIndex: number;
 };
 
-export type LessonNote = {
+export type LessonEventSource = "demo" | "recognized" | "manual";
+export type RestType = "whole" | "half" | "quarter" | "eighth" | "sixteenth";
+
+type LessonEventBase = {
   id: string;
   written: string;
   sounding: string;
@@ -29,9 +32,22 @@ export type LessonNote = {
   frequency: number;
   staffOffset: number;
   confidence: number;
-  source: "demo" | "recognized" | "manual";
-  fingering: Fingering;
+  source: LessonEventSource;
 };
+
+export type LessonPitchEvent = LessonEventBase & {
+  kind: "note";
+  fingering: Fingering;
+  restType: null;
+};
+
+export type LessonRestEvent = LessonEventBase & {
+  kind: "rest";
+  fingering: null;
+  restType: RestType;
+};
+
+export type LessonNote = LessonPitchEvent | LessonRestEvent;
 
 // Yamaha's chart contains 42 written pitches and 19 explicitly marked
 // alternate fingerings. Each fingering is exported as its own standard chart.
@@ -44,10 +60,25 @@ const SHARP_NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A
 const FLAT_NAMES = ["C", "D♭", "D", "E♭", "E", "F", "G♭", "G", "A♭", "A", "B♭", "B"];
 const SOLFEGE = ["Do", "Do♯", "Re", "Mi♭", "Mi", "Fa", "Fa♯", "Sol", "Sol♯", "La", "Si♭", "Si"];
 const RHYTHM_NAMES: Record<number, string> = {
+  0.25: "十六分音符",
   0.5: "八分音符",
+  0.75: "附点八分音符",
   1: "四分音符",
+  1.5: "附点四分音符",
   2: "二分音符",
+  3: "附点二分音符",
   4: "全音符",
+};
+
+const REST_RHYTHM_NAMES: Record<number, string> = {
+  0.25: "十六分休止符",
+  0.5: "八分休止符",
+  0.75: "附点八分休止符",
+  1: "四分休止符",
+  1.5: "附点四分休止符",
+  2: "二分休止符",
+  3: "附点二分休止符",
+  4: "全休止符",
 };
 
 const normalizeAccidentals = (value: string) =>
@@ -128,11 +159,12 @@ export function buildLessonNote(
   written: string,
   beats = 1,
   options: Partial<Pick<LessonNote, "id" | "confidence" | "source">> = {},
-): LessonNote {
+): LessonPitchEvent {
   const normalized = normalizeAccidentals(written);
   const midi = pitchToMidi(normalized);
   const pitchClass = ((midi % 12) + 12) % 12;
   return {
+    kind: "note",
     id: options.id ?? `${normalized}-${crypto.randomUUID()}`,
     written: normalized,
     sounding: midiToPitch(midi - 2, true),
@@ -144,6 +176,37 @@ export function buildLessonNote(
     confidence: options.confidence ?? 1,
     source: options.source ?? "manual",
     fingering: getFingering(normalized),
+    restType: null,
+  };
+}
+
+export function restTypeFromBeats(beats: number): RestType {
+  if (beats >= 4) return "whole";
+  if (beats >= 2) return "half";
+  if (beats >= 1) return "quarter";
+  if (beats >= 0.5) return "eighth";
+  return "sixteenth";
+}
+
+export function buildRestEvent(
+  beats = 1,
+  options: Partial<Pick<LessonNote, "id" | "confidence" | "source">> & { restType?: RestType } = {},
+): LessonRestEvent {
+  const restType = options.restType ?? restTypeFromBeats(beats);
+  return {
+    kind: "rest",
+    id: options.id ?? `rest-${crypto.randomUUID()}`,
+    written: "休",
+    sounding: "静音",
+    solfege: "Rest",
+    beats,
+    rhythm: REST_RHYTHM_NAMES[beats] ?? `${beats} 拍休止`,
+    frequency: 0,
+    staffOffset: 0,
+    confidence: options.confidence ?? 1,
+    source: options.source ?? "manual",
+    fingering: null,
+    restType,
   };
 }
 
@@ -161,11 +224,11 @@ export const CLARINET_RANGE = Array.from({ length: 42 }, (_, index) => {
 });
 
 export const DEMO_LESSON: LessonNote[] = [
-  buildLessonNote("C4", 1, { id: "demo-c4", source: "demo" }),
-  buildLessonNote("D4", 1, { id: "demo-d4", source: "demo" }),
-  buildLessonNote("E4", 1, { id: "demo-e4", source: "demo" }),
-  buildLessonNote("F4", 1, { id: "demo-f4", source: "demo" }),
-  buildLessonNote("G4", 2, { id: "demo-g4", source: "demo" }),
-  buildLessonNote("A4", 1, { id: "demo-a4", source: "demo" }),
-  buildLessonNote("G4", 1, { id: "demo-g4-end", source: "demo" }),
+  buildLessonNote("C4", 0.5, { id: "demo-c4", source: "demo" }),
+  buildLessonNote("D4", 0.5, { id: "demo-d4", source: "demo" }),
+  buildRestEvent(0.5, { id: "demo-rest", source: "demo" }),
+  buildLessonNote("E4", 1.5, { id: "demo-e4", source: "demo" }),
+  buildLessonNote("F4", 0.25, { id: "demo-f4", source: "demo" }),
+  buildLessonNote("G4", 0.25, { id: "demo-g4", source: "demo" }),
+  buildLessonNote("A4", 2, { id: "demo-a4", source: "demo" }),
 ];
