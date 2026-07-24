@@ -69,4 +69,11 @@ test("builds silent rest events for the editable timeline", () => {
   assert.equal(rest.rhythm, "附点八分休止符");
   assert.equal(rest.frequency, 0);
   assert.equal(rest.fingering, null);
+  assert.equal(rest.articulation, "silent");
+});
+
+test("keeps tongued and slurred playback instructions separate", () => {
+  assert.equal(buildLessonNote("C5").articulation, "tongued");
+  assert.equal(buildLessonNote("D5", 0.5, { articulation: "slur-start" }).articulation, "slur-start");
+  assert.equal(buildLessonNote("E5", 0.5, { articulation: "slurred" }).articulation, "slurred");
 });

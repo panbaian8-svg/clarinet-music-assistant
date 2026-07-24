@@ -2,6 +2,7 @@ import {
   buildLessonNote,
   buildRestEvent,
   type LessonNote,
+  type NoteArticulation,
   type RestType,
 } from "./clarinet";
 
@@ -15,6 +16,9 @@ export type RecognitionResult = {
   restCount: number;
   dottedCount: number;
   subdivisionCount: number;
+  meterBeats: number;
+  slurNoteCount: number;
+  slurGroupCount: number;
 };
 
 type Staff = {
@@ -37,8 +41,18 @@ type NoteCandidate = {
   beats: number;
   accidental: "♯" | "♭" | "";
   dotted: boolean;
+  dotX: number | null;
   subdivisionCount: number;
   stemX: number;
+  rhythmEvidence: {
+    primarySpan: number;
+    primaryCoverage: number;
+    secondarySpan: number;
+    secondaryCoverage: number;
+  };
+  beamToPrevious: boolean;
+  beamToNext: boolean;
+  articulation: NoteArticulation;
 };
 
 type RestCandidate = {
@@ -82,6 +96,10 @@ export type BinaryScoreEvent = {
   x: number;
   y: number;
   confidence: number;
+  subdivisionCount: number;
+  measureIndex: number;
+  articulation: NoteArticulation | "silent";
+  restType: RestType | null;
 };
 
 const clamp = (value: number, min: number, max: number) =>
@@ -393,6 +411,7 @@ function connectedComponents(
   width: number,
   height: number,
   bounds: { x0: number; y0: number; x1: number; y1: number },
+  includeDiagonals = false,
 ) {
   const left = clamp(Math.floor(bounds.x0), 0, width - 1);
   const top = clamp(Math.floor(bounds.y0), 0, height - 1);
@@ -433,6 +452,14 @@ function connectedComponents(
           [currentX, currentY - 1],
           [currentX, currentY + 1],
         ];
+        if (includeDiagonals) {
+          neighbors.push(
+            [currentX - 1, currentY - 1],
+            [currentX + 1, currentY - 1],
+            [currentX - 1, currentY + 1],
+            [currentX + 1, currentY + 1],
+          );
+        }
         for (const [nextX, nextY] of neighbors) {
           if (nextX < left || nextX > right || nextY < top || nextY > bottom) continue;
           const next = nextY * width + nextX;
@@ -470,25 +497,30 @@ function detectAugmentationDot(
   y: number,
   spacing: number,
 ) {
-  const x0 = rightEdge + spacing * 0.18;
-  const x1 = rightEdge + spacing * 1.02;
-  const y0 = y - spacing * 0.72;
-  const y1 = y + spacing * 0.72;
+  const x0 = rightEdge + spacing * 0.4;
+  const x1 = rightEdge + spacing * 1.23;
+  const y0 = y - spacing * 1.2;
+  const y1 = y + spacing * 1.2;
   const components = connectedComponents(data, width, height, { x0, y0, x1, y1 });
-  return components.some((component) => {
+  const component = components.find((component) => {
     const componentWidth = component.x1 - component.x0 + 1;
     const componentHeight = component.y1 - component.y0 + 1;
     const centerY = (component.y0 + component.y1) / 2;
+    const aspectRatio = componentWidth / Math.max(1, componentHeight);
+    const density = component.pixels / Math.max(1, componentWidth * componentHeight);
     return (
       componentWidth >= spacing * 0.14 &&
-      componentWidth <= spacing * 0.52 &&
+      componentWidth <= spacing * 0.7 &&
       componentHeight >= spacing * 0.14 &&
-      componentHeight <= spacing * 0.52 &&
+      componentHeight <= spacing * 0.7 &&
       component.pixels >= spacing * spacing * 0.025 &&
-      component.pixels <= spacing * spacing * 0.24 &&
-      Math.abs(centerY - y) <= spacing * 0.62
+      component.pixels <= spacing * spacing * 0.38 &&
+      aspectRatio >= 0.62 && aspectRatio <= 1.5 &&
+      density >= 0.48 &&
+      Math.abs(centerY - y) <= spacing * 1.1
     );
   });
+  return component ? (component.x0 + component.x1) / 2 : null;
 }
 
 function longestVerticalRun(data: Uint8Array, width: number, height: number, x: number, y0: number, y1: number) {
@@ -509,6 +541,39 @@ function longestVerticalRun(data: Uint8Array, width: number, height: number, x: 
     }
   }
   return { length: longest, start: bestStart, end: bestStart + longest };
+}
+
+export function detectBarlines(binary: BinaryImage, staves = detectStaves(binary)) {
+  return staves.map((staff, staffIndex) => {
+    const spacing = staff.spacing;
+    const startX = staff.left + (staffIndex === 0 ? spacing * 6.2 : spacing * 4.05);
+    const endX = staff.right - spacing * 0.4;
+    const activeColumns: number[] = [];
+    for (let x = Math.round(startX); x <= Math.round(endX); x += 1) {
+      const topLine = Math.round(staff.lines[0]);
+      const bottomLine = Math.round(staff.lines[4]);
+      const run = longestVerticalRun(
+        binary.data,
+        binary.width,
+        binary.height,
+        x,
+        Math.round(topLine - spacing * 0.28),
+        Math.round(bottomLine + spacing * 0.28),
+      );
+      const crossesTop = run.start <= topLine + spacing * 0.32;
+      const crossesBottom = run.end >= bottomLine - spacing * 0.32;
+      if (run.length >= spacing * 3.7 && crossesTop && crossesBottom) activeColumns.push(x);
+    }
+    const groups: number[][] = [];
+    for (const x of activeColumns) {
+      const group = groups.at(-1);
+      if (!group || x - group.at(-1)! > Math.max(2, spacing * 0.3)) groups.push([x]);
+      else group.push(x);
+    }
+    return groups
+      .filter((group) => group.length <= spacing * 1.6)
+      .map((group) => group.reduce((sum, x) => sum + x, 0) / group.length);
+  });
 }
 
 function longestBoundedHorizontalRun(
@@ -610,31 +675,102 @@ function detectAccidental(
   return "";
 }
 
-function detectFlagCount(
-  integral: Uint32Array,
+function horizontalAttachmentSpan(
+  data: Uint8Array,
+  width: number,
+  height: number,
+  stemX: number,
+  centerY: number,
+  spacing: number,
+) {
+  const bandHalfHeight = Math.max(2, Math.round(spacing * 0.32));
+  const minimumColumnInk = Math.max(3, Math.round(spacing * 0.22));
+  const innerGap = Math.max(1, Math.round(spacing * 0.16));
+  const reach = Math.max(3, Math.round(spacing * 2.35));
+  const allowedGap = Math.max(1, Math.round(spacing * 0.16));
+  let bestSpan = 0;
+  let bestCoverage = 0;
+
+  for (const direction of [-1, 1]) {
+    let attachedSpan = 0;
+    let covered = 0;
+    let sampled = 0;
+    let gap = 0;
+    for (let distance = innerGap; distance <= reach; distance += 1) {
+      const x = Math.round(stemX + direction * distance);
+      if (x < 0 || x >= width) continue;
+      let columnInk = 0;
+      for (let dy = -bandHalfHeight; dy <= bandHalfHeight; dy += 1) {
+        const y = Math.round(centerY + dy);
+        if (y < 0 || y >= height) continue;
+        columnInk += data[y * width + x];
+      }
+      sampled += 1;
+      if (columnInk >= minimumColumnInk) {
+        covered += 1;
+        gap = 0;
+        attachedSpan = distance - innerGap + 1;
+      } else {
+        gap += 1;
+        if (gap > allowedGap) break;
+      }
+    }
+    bestSpan = Math.max(bestSpan, attachedSpan / spacing);
+    bestCoverage = Math.max(bestCoverage, covered / Math.max(1, sampled));
+  }
+  return { span: bestSpan, coverage: bestCoverage };
+}
+
+function detectStemSubdivisionCount(
+  data: Uint8Array,
   width: number,
   height: number,
   candidate: NoteCandidate,
   spacing: number,
 ) {
-  const direction = candidate.stemUp ? 1 : -1;
-  const left = candidate.stemX - spacing * 0.3;
-  const right = candidate.stemX + spacing * 1.4;
-  const bandInk = (offset: number) =>
-    rectangleSum(
-      integral,
+  const towardHead = candidate.stemUp ? 1 : -1;
+  const maximumOffset = Math.max(3, Math.round(spacing * 1.9));
+  const allowedGap = Math.max(1, Math.round(spacing * 0.1));
+  const minimumBandHeight = Math.max(2, Math.round(spacing * 0.13));
+  const bands: Array<{ rows: number; span: number; coverage: number }> = [];
+  let activeBand: { rows: number; span: number; coverage: number } | null = null;
+  let gap = 0;
+
+  for (let offset = 0; offset <= maximumOffset; offset += 1) {
+    const stats = horizontalAttachmentSpan(
+      data,
       width,
       height,
-      left,
-      candidate.stemTop + direction * spacing * (offset - 0.22),
-      right,
-      candidate.stemTop + direction * spacing * (offset + 0.22),
-    ) / Math.max(1, spacing * spacing);
-  const first = bandInk(0.38);
-  const second = bandInk(0.92);
-  if (first > 0.24 && second > 0.18) return 2;
-  if (first > 0.2) return 1;
-  return 0;
+      candidate.stemX,
+      candidate.stemTop + towardHead * offset,
+      spacing,
+    );
+    const active = stats.span >= 0.44 && stats.coverage >= 0.18;
+    if (active) {
+      if (!activeBand) activeBand = { rows: 0, span: 0, coverage: 0 };
+      activeBand.rows += 1;
+      activeBand.span = Math.max(activeBand.span, stats.span);
+      activeBand.coverage = Math.max(activeBand.coverage, stats.coverage);
+      gap = 0;
+      continue;
+    }
+    if (!activeBand) continue;
+    gap += 1;
+    if (gap <= allowedGap) continue;
+    if (activeBand.rows >= minimumBandHeight) bands.push(activeBand);
+    activeBand = null;
+    gap = 0;
+  }
+  if (activeBand && activeBand.rows >= minimumBandHeight) bands.push(activeBand);
+  const primary = bands[0] ?? { span: 0, coverage: 0 };
+  const secondary = bands[1] ?? { span: 0, coverage: 0 };
+  return {
+    count: Math.min(2, bands.length),
+    primarySpan: primary.span,
+    primaryCoverage: primary.coverage,
+    secondarySpan: secondary.span,
+    secondaryCoverage: secondary.coverage,
+  };
 }
 
 function detectBeamCount(
@@ -694,7 +830,6 @@ function detectBeamCount(
     bestLeftY = leftNote.stemTop;
     bestRightY = rightNote.stemTop;
   } else {
-    if (first.dotted || second.dotted) return 0;
     for (const direction of [-1, 1]) {
       for (let offset = 1.45; offset <= 3.95; offset += 0.22) {
         for (let tilt = -0.7; tilt <= 0.7; tilt += 0.2) {
@@ -734,6 +869,77 @@ export function pitchFromStaffStep(step: number, accidental: "♯" | "♭" | "")
   const octave = Math.floor(absoluteDiatonic / 7);
   const letter = letters[((absoluteDiatonic % 7) + 7) % 7];
   return `${letter}${accidental}${octave}`;
+}
+
+function refineNoteHeadPosition(
+  raw: Uint8Array,
+  clean: Uint8Array,
+  width: number,
+  height: number,
+  candidate: NoteCandidate,
+  staff: Staff,
+) {
+  const spacing = staff.spacing;
+  const left = clamp(Math.round(candidate.x - spacing * 0.78), 0, width - 1);
+  const right = clamp(Math.round(candidate.x + spacing * 0.78), 0, width - 1);
+  const top = clamp(Math.round(candidate.y - spacing * 0.95), 0, height - 1);
+  const bottom = clamp(Math.round(candidate.y + spacing * 0.95), 0, height - 1);
+  let weightedY = 0;
+  let totalWeight = 0;
+
+  for (let y = top; y <= bottom; y += 1) {
+    let rowInk = 0;
+    let longestRun = 0;
+    let currentRun = 0;
+    for (let x = left; x <= right; x += 1) {
+      if (clean[y * width + x]) {
+        rowInk += 1;
+        currentRun += 1;
+        longestRun = Math.max(longestRun, currentRun);
+      } else {
+        currentRun = 0;
+      }
+    }
+    if (longestRun > spacing * 1.72) continue;
+    const weight = Math.max(0, rowInk - spacing * 0.12);
+    weightedY += y * weight;
+    totalWeight += weight;
+  }
+  if (totalWeight < spacing * 0.7) return;
+
+  const centroidY = weightedY / totalWeight;
+  const refinedStep = Math.round(((staff.lines[4] - centroidY) * 2) / spacing);
+  if (Math.abs(refinedStep - candidate.step) > 1) return;
+  if (refinedStep === candidate.step) return;
+  const refinedY = staff.lines[4] - (refinedStep * spacing) / 2;
+  const xRadius = Math.max(2, Math.round(spacing * 0.3));
+  const yRadius = Math.max(1, Math.round(spacing * 0.2));
+  let coreInk = 0;
+  let coreArea = 0;
+  for (let y = Math.round(refinedY) - yRadius; y <= Math.round(refinedY) + yRadius; y += 1) {
+    for (let x = Math.round(candidate.x) - xRadius; x <= Math.round(candidate.x) + xRadius; x += 1) {
+      if (x < 0 || x >= width || y < 0 || y >= height) continue;
+      coreArea += 1;
+      coreInk += raw[y * width + x];
+    }
+  }
+  const coreDensity = coreInk / Math.max(1, coreArea);
+  let currentCoreInk = 0;
+  let currentCoreArea = 0;
+  for (let y = Math.round(candidate.y) - yRadius; y <= Math.round(candidate.y) + yRadius; y += 1) {
+    for (let x = Math.round(candidate.x) - xRadius; x <= Math.round(candidate.x) + xRadius; x += 1) {
+      if (x < 0 || x >= width || y < 0 || y >= height) continue;
+      currentCoreArea += 1;
+      currentCoreInk += raw[y * width + x];
+    }
+  }
+  const currentCoreDensity = currentCoreInk / Math.max(1, currentCoreArea);
+  if (candidate.filled || coreDensity < 0.7 || coreDensity - currentCoreDensity < 0.2) return;
+  const hasStem = Math.abs(candidate.stemTop - refinedY) > spacing * 1.05;
+  candidate.step = refinedStep;
+  candidate.y = refinedY;
+  candidate.filled = coreDensity >= 0.7;
+  candidate.beats = candidate.filled ? 1 : hasStem ? 2 : 4;
 }
 
 function detectNoteCandidates(binary: BinaryImage, clean: Uint8Array, staves: Staff[]) {
@@ -919,8 +1125,18 @@ function detectNoteCandidates(binary: BinaryImage, clean: Uint8Array, staves: St
           beats: filled ? 1 : hasStem ? 2 : 4,
           accidental,
           dotted: false,
+          dotX: null,
           subdivisionCount: 0,
           stemX: candidateX + spacing * (stemUp ? rightStemProbe.offset : -leftStemProbe.offset),
+          rhythmEvidence: {
+            primarySpan: 0,
+            primaryCoverage: 0,
+            secondarySpan: 0,
+            secondaryCoverage: 0,
+          },
+          beamToPrevious: false,
+          beamToNext: false,
+          articulation: "tongued",
         });
       }
     }
@@ -1002,6 +1218,16 @@ function detectNoteCandidates(binary: BinaryImage, clean: Uint8Array, staves: St
     }
   });
   kept.sort((a, b) => a.staffIndex - b.staffIndex || a.x - b.x);
+  kept.forEach((candidate) => {
+    refineNoteHeadPosition(
+      data,
+      clean,
+      width,
+      height,
+      candidate,
+      staves[candidate.staffIndex],
+    );
+  });
   kept.forEach((candidate, index) => {
     if (!candidate.accidental) return;
     const spacing = staves[candidate.staffIndex].spacing;
@@ -1015,32 +1241,72 @@ function detectNoteCandidates(binary: BinaryImage, clean: Uint8Array, staves: St
   });
   kept.forEach((candidate) => {
     const spacing = staves[candidate.staffIndex].spacing;
-    candidate.dotted = detectAugmentationDot(
-      clean,
+    candidate.dotX = detectAugmentationDot(
+      data,
       width,
       height,
       candidate.x + spacing * 0.72,
       candidate.y,
       spacing,
     );
+    candidate.dotted = candidate.dotX !== null;
+    if (candidate.dotX !== null) {
+      const verticalRun = longestVerticalRun(
+        data,
+        width,
+        height,
+        Math.round(candidate.dotX),
+        Math.round(candidate.y - spacing * 3.5),
+        Math.round(candidate.y + spacing * 3.5),
+      );
+      if (verticalRun.length > spacing * 1.35) {
+        candidate.dotX = null;
+        candidate.dotted = false;
+      }
+    }
+  });
+  kept.forEach((candidate, index) => {
+    if (candidate.dotX === null) return;
+    const next = kept[index + 1];
+    if (next?.staffIndex !== candidate.staffIndex) return;
+    const spacing = staves[candidate.staffIndex].spacing;
+    const midpoint = (candidate.x + next.x) / 2;
+    if (candidate.dotX >= midpoint - spacing * 0.12) {
+      candidate.dotX = null;
+      candidate.dotted = false;
+    }
+  });
+
+  kept.forEach((candidate) => {
+    if (!candidate.filled || candidate.dotted) return;
+    const spacing = staves[candidate.staffIndex].spacing;
+    const evidence = detectStemSubdivisionCount(
+      clean,
+      width,
+      height,
+      candidate,
+      spacing,
+    );
+    candidate.subdivisionCount = evidence.count;
+    candidate.rhythmEvidence = evidence;
   });
 
   for (let index = 0; index < kept.length - 1; index += 1) {
     const first = kept[index];
     const second = kept[index + 1];
     if (!first.filled || !second.filled || first.staffIndex !== second.staffIndex) continue;
+    if (first.stemUp !== second.stemUp) continue;
     const spacing = staves[first.staffIndex].spacing;
-    if (second.x - first.x > spacing * 4.6) continue;
+    const maximumBeamGap = first.dotted || second.dotted ? spacing * 7.2 : spacing * 4.6;
+    if (second.x - first.x > maximumBeamGap) continue;
     const beamCount = detectBeamCount(clean, width, height, first, second, spacing);
+    if (beamCount > 0) {
+      first.beamToNext = true;
+      second.beamToPrevious = true;
+    }
     first.subdivisionCount = Math.max(first.subdivisionCount, beamCount);
     second.subdivisionCount = Math.max(second.subdivisionCount, beamCount);
   }
-
-  kept.forEach((candidate) => {
-    if (!candidate.filled || candidate.dotted || candidate.subdivisionCount > 0) return;
-    const spacing = staves[candidate.staffIndex].spacing;
-    candidate.subdivisionCount = detectFlagCount(cleanIntegral, width, height, candidate, spacing);
-  });
 
   kept.forEach((candidate) => {
     candidate.beats = applyRhythmMarks(candidate.beats, candidate.subdivisionCount, candidate.dotted);
@@ -1107,7 +1373,7 @@ function detectRestCandidates(
       });
       if (!classification) continue;
 
-      const dotted = detectAugmentationDot(clean, width, height, component.x1, y, spacing);
+      const dotted = detectAugmentationDot(clean, width, height, component.x1, y, spacing) !== null;
       candidates.push({
         kind: "rest",
         staffIndex,
@@ -1139,25 +1405,448 @@ function detectRestCandidates(
   return kept.sort((a, b) => a.staffIndex - b.staffIndex || a.x - b.x);
 }
 
+function detectSlurArticulations(
+  clean: Uint8Array,
+  width: number,
+  height: number,
+  staves: Staff[],
+  notes: NoteCandidate[],
+  barlines: number[][],
+) {
+  let slurCount = 0;
+  staves.forEach((staff, staffIndex) => {
+    const spacing = staff.spacing;
+    const staffNotes = notes.filter((note) => note.staffIndex === staffIndex);
+    if (staffNotes.length < 2) return;
+    const slurInk = clean.slice();
+    const staffBand = Math.max(1, Math.round(spacing * 0.22));
+    staff.lines.forEach((line) => {
+      for (let y = Math.max(0, Math.round(line) - staffBand); y <= Math.min(height - 1, Math.round(line) + staffBand); y += 1) {
+        slurInk.fill(0, y * width + staff.left, y * width + staff.right + 1);
+      }
+    });
+    staffNotes.forEach((note) => {
+      const headLeft = clamp(Math.round(note.x - spacing * 0.68), 0, width - 1);
+      const headRight = clamp(Math.round(note.x + spacing * 0.68), 0, width - 1);
+      const headTop = clamp(Math.round(note.y - spacing * 0.58), 0, height - 1);
+      const headBottom = clamp(Math.round(note.y + spacing * 0.58), 0, height - 1);
+      for (let y = headTop; y <= headBottom; y += 1) {
+        slurInk.fill(0, y * width + headLeft, y * width + headRight + 1);
+      }
+      const stemLeft = clamp(Math.round(note.stemX - spacing * 0.24), 0, width - 1);
+      const stemRight = clamp(Math.round(note.stemX + spacing * 0.24), 0, width - 1);
+      const stemTop = clamp(Math.round(Math.min(note.y, note.stemTop) - spacing * 0.3), 0, height - 1);
+      const stemBottom = clamp(Math.round(Math.max(note.y, note.stemTop) + spacing * 0.3), 0, height - 1);
+      for (let y = stemTop; y <= stemBottom; y += 1) {
+        slurInk.fill(0, y * width + stemLeft, y * width + stemRight + 1);
+      }
+    });
+    for (let index = 0; index < staffNotes.length - 1; index += 1) {
+      const first = staffNotes[index];
+      const second = staffNotes[index + 1];
+      if (!first.beamToNext || !second.beamToPrevious) continue;
+      const left = Math.round(Math.min(first.stemX, second.stemX));
+      const right = Math.round(Math.max(first.stemX, second.stemX));
+      const beamBand = Math.max(2, Math.round(spacing * 0.48));
+      for (let x = left; x <= right; x += 1) {
+        const progress = (x - left) / Math.max(1, right - left);
+        const center = Math.round(first.stemTop + (second.stemTop - first.stemTop) * progress);
+        for (let y = Math.max(0, center - beamBand); y <= Math.min(height - 1, center + beamBand); y += 1) {
+          slurInk[y * width + x] = 0;
+        }
+      }
+    }
+    const intervals: Array<{ start: number; end: number; score: number }> = [];
+    const addInterval = (start: number, end: number, score: number) => {
+      if (end <= start) return;
+      const duplicate = intervals.find((interval) => interval.start === start && interval.end === end);
+      if (duplicate) duplicate.score = Math.max(duplicate.score, score);
+      else intervals.push({ start, end, score });
+    };
+    const components = connectedComponents(slurInk, width, height, {
+      x0: staff.left,
+      y0: staff.lines[0] - spacing * 4.4,
+      x1: staff.right,
+      y1: staff.lines[4] + spacing * 4.4,
+    }, true);
+    const possibleSlurs = components
+      .map((component) => {
+        const componentWidth = component.x1 - component.x0 + 1;
+        const componentHeight = component.y1 - component.y0 + 1;
+        const density = component.pixels / Math.max(1, componentWidth * componentHeight);
+        return { component, componentWidth, componentHeight, density };
+      })
+      .filter(({ componentWidth, componentHeight, density }) =>
+        componentWidth >= spacing * 0.55 &&
+        componentWidth <= spacing * 15 &&
+        componentHeight >= spacing * 0.14 &&
+        componentHeight <= spacing * 2.45 &&
+        componentWidth / Math.max(1, componentHeight) >= 2.25 &&
+        density >= 0.035 && density <= 0.48,
+      )
+      .sort((a, b) => a.component.x0 - b.component.x0);
+
+    possibleSlurs.forEach(({ component, componentWidth, componentHeight, density }) => {
+      const included = staffNotes.filter(
+        (note) => note.x >= component.x0 - spacing * 1.25 && note.x <= component.x1 + spacing * 1.25,
+      );
+      if (included.length < 2 || included.length > 10) return;
+      const first = included[0];
+      const last = included.at(-1)!;
+      if (
+        Math.abs(first.x - component.x0) > spacing * 2 ||
+        Math.abs(last.x - component.x1) > spacing * 2
+      ) return;
+      const centerY = (component.y0 + component.y1) / 2;
+      const highestHead = Math.min(...included.map((note) => note.y));
+      const lowestHead = Math.max(...included.map((note) => note.y));
+      const isAbove = centerY < highestHead - spacing * 0.42 && component.y0 < highestHead - spacing * 0.62;
+      const isBelow = centerY > lowestHead + spacing * 0.42 && component.y1 > lowestHead + spacing * 0.62;
+      if (!isAbove && !isBelow) return;
+
+      // A beam is a dense, almost straight band; a slur has a visibly curved top/bottom profile.
+      const columnCenters: number[] = [];
+      const sampleCount = 7;
+      for (let sample = 0; sample < sampleCount; sample += 1) {
+        const x = Math.round(component.x0 + (componentWidth - 1) * (sample / (sampleCount - 1)));
+        let weightedY = 0;
+        let ink = 0;
+        for (let y = component.y0; y <= component.y1; y += 1) {
+          if (!slurInk[y * width + x]) continue;
+          weightedY += y;
+          ink += 1;
+        }
+        if (ink > 0) columnCenters.push(weightedY / ink);
+      }
+      if (columnCenters.length < 4) return;
+      const endAverage = (columnCenters[0] + columnCenters.at(-1)!) / 2;
+      const middle = columnCenters[Math.floor(columnCenters.length / 2)];
+      const curvature = Math.abs(middle - endAverage);
+      if (curvature < Math.max(0.7, componentHeight * 0.075)) return;
+      const start = staffNotes.indexOf(first);
+      const end = staffNotes.indexOf(last);
+      addInterval(
+        start,
+        end,
+        clamp(0.7 + curvature / Math.max(1, componentHeight) * 0.16 - density * 0.12, 0.62, 0.9),
+      );
+    });
+
+    const curvedStrokeScore = (start: number, end: number, direction: -1 | 1) => {
+      const first = staffNotes[start];
+      const last = staffNotes[end];
+      const x0 = Math.round(first.x);
+      const x1 = Math.round(last.x);
+      const span = x1 - x0;
+      if (span < spacing * 1.35 || span > spacing * 15) return 0;
+      const tolerance = Math.max(1, Math.round(spacing * 0.17));
+      let best = 0;
+      for (const endpointOffset of [0.28, 0.48, 0.7, 0.92]) {
+        for (const archHeight of [0.28, 0.48, 0.72, 1.02, 1.38]) {
+          let covered = 0;
+          let strong = 0;
+          let samples = 0;
+          const inset = Math.max(1, Math.round(span * 0.025));
+          for (let x = x0 + inset; x <= x1 - inset; x += 1) {
+            const progress = (x - x0) / Math.max(1, span);
+            const baseline = first.y + (last.y - first.y) * progress;
+            const curve = direction * spacing * (
+              endpointOffset + archHeight * 4 * progress * (1 - progress)
+            );
+            const expectedY = Math.round(baseline + curve);
+            let ink = 0;
+            for (let dy = -tolerance; dy <= tolerance; dy += 1) {
+              const y = expectedY + dy;
+              if (y >= 0 && y < height) ink += slurInk[y * width + x];
+            }
+            covered += Number(ink > 0);
+            strong += Number(ink >= 2);
+            samples += 1;
+          }
+          const coverage = covered / Math.max(1, samples);
+          const strongCoverage = strong / Math.max(1, samples);
+          best = Math.max(best, coverage * 0.72 + strongCoverage * 0.28);
+        }
+      }
+      return best;
+    };
+
+    const componentIntervals = [...intervals];
+    componentIntervals.forEach((interval) => {
+      for (let end = interval.end + 1; end < Math.min(staffNotes.length, interval.end + 4); end += 1) {
+        if (staffNotes[end].x - staffNotes[end - 1].x > spacing * 4.8) break;
+        if (barlines[staffIndex].some((barline) => barline > staffNotes[interval.start].x && barline < staffNotes[end].x)) break;
+        const extensionScore = Math.max(
+          curvedStrokeScore(interval.start, end, -1),
+          curvedStrokeScore(interval.start, end, 1),
+        );
+        if (extensionScore >= 0.44) {
+          addInterval(interval.start, end, Math.max(extensionScore, interval.score - 0.05));
+        }
+      }
+    });
+
+    for (let start = 0; start < staffNotes.length - 1; start += 1) {
+      for (let end = start + 1; end < Math.min(staffNotes.length, start + 9); end += 1) {
+        const gap = staffNotes[end].x - staffNotes[end - 1].x;
+        if (gap > spacing * 7.8) break;
+        if (barlines[staffIndex].some((barline) => barline > staffNotes[start].x && barline < staffNotes[end].x)) break;
+        const score = Math.max(
+          curvedStrokeScore(start, end, -1),
+          curvedStrokeScore(start, end, 1),
+        );
+        if (score >= 0.58) addInterval(start, end, score);
+      }
+    }
+
+    const selected: typeof intervals = [];
+    intervals
+      .sort((a, b) =>
+        (b.score + Math.min(0.18, (b.end - b.start) * 0.035)) -
+        (a.score + Math.min(0.18, (a.end - a.start) * 0.035)),
+      )
+      .forEach((interval) => {
+        const overlaps = selected.some(
+          (existing) => interval.start <= existing.end && interval.end >= existing.start,
+        );
+        if (!overlaps) selected.push(interval);
+      });
+    selected
+      .sort((a, b) => a.start - b.start)
+      .forEach(({ start, end }) => {
+        staffNotes[start].articulation = "slur-start";
+        for (let index = start + 1; index <= end; index += 1) {
+          staffNotes[index].articulation = "slurred";
+        }
+        slurCount += 1;
+      });
+  });
+  return slurCount;
+}
+
+function filterBarlines(staves: Staff[], candidates: Candidate[], bareBarlines: number[][]) {
+  return bareBarlines.map((staffBarlines, staffIndex) => {
+    const spacing = staves[staffIndex].spacing;
+    const staffNotes = candidates.filter(
+      (candidate): candidate is NoteCandidate =>
+        candidate.kind === "note" && candidate.staffIndex === staffIndex,
+    );
+    return staffBarlines.filter(
+      (barline) => !staffNotes.some(
+        (note) =>
+          Math.abs(note.stemX - barline) < spacing * 0.82 ||
+          Math.abs(note.x - barline) < spacing * 1.05,
+      ),
+    );
+  });
+}
+
+function rhythmOptions(candidate: Candidate, targetBeats: number) {
+  if (candidate.kind === "rest") {
+    return [candidate.restType === "whole" ? targetBeats : candidate.beats];
+  }
+  if (!candidate.filled) return [candidate.beats];
+  const multiplier = candidate.dotted ? 1.5 : 1;
+  const baseOptions = candidate.dotted ? [1, 0.5] : [1, 0.5, 0.25];
+  return baseOptions.map((beats) => beats * multiplier);
+}
+
+function rhythmChoiceCost(candidate: Candidate, beats: number) {
+  if (candidate.kind === "rest" || !candidate.filled) return 0;
+  const plainBeats = beats / (candidate.dotted ? 1.5 : 1);
+  const level = plainBeats >= 0.99 ? 0 : plainBeats >= 0.49 ? 1 : 2;
+  let cost = Math.abs(level - candidate.subdivisionCount) * 0.7;
+  const isBeamed = candidate.beamToPrevious || candidate.beamToNext;
+  if (isBeamed && level === 0) cost += 1.15;
+  if (!isBeamed && candidate.subdivisionCount === 0 && level > 0) cost += level * 0.22;
+  return cost;
+}
+
+function decodeMeasureRhythm(events: Candidate[], targetBeats: number) {
+  const targetUnits = Math.round(targetBeats * 4);
+  let bestUnits = -1;
+  let best: { cost: number; beats: number[] } | null = null;
+  const beamGroupingCost = (beats: number[]) => {
+    let cost = 0;
+    let groupTotal = 0;
+    let groupLength = 0;
+    const commit = () => {
+      if (groupLength >= 2) {
+        const preferredTotal = groupLength >= 5 ? Math.min(2, targetBeats) : 1;
+        cost += Math.abs(groupTotal - preferredTotal) * 2.2;
+      }
+      groupTotal = 0;
+      groupLength = 0;
+    };
+    events.forEach((event, index) => {
+      if (event.kind !== "note") {
+        commit();
+        return;
+      }
+      if (!event.beamToPrevious) commit();
+      groupTotal += beats[index];
+      groupLength += 1;
+      if (!event.beamToNext) commit();
+    });
+    commit();
+    return cost;
+  };
+  const visit = (index: number, units: number, cost: number, beats: number[]) => {
+    if (units > targetUnits + 8) return;
+    if (index === events.length) {
+      const totalCost = cost + Math.abs(units - targetUnits) * 1.8 + beamGroupingCost(beats);
+      if (!best || totalCost < best.cost) {
+        bestUnits = units;
+        best = { cost: totalCost, beats: [...beats] };
+      }
+      return;
+    }
+    for (const option of rhythmOptions(events[index], targetBeats)) {
+      beats.push(option);
+      visit(
+        index + 1,
+        units + Math.round(option * 4),
+        cost + rhythmChoiceCost(events[index], option),
+        beats,
+      );
+      beats.pop();
+    }
+  };
+  visit(0, 0, 0, []);
+  const winner = best as { cost: number; beats: number[] } | null;
+  return {
+    beats: winner?.beats ?? events.map((event) => event.beats),
+    cost: winner?.cost ?? 99,
+    exact: bestUnits === targetUnits,
+  };
+}
+
+function groupMeasures(candidates: Candidate[], barlines: number[][]) {
+  const measures: Candidate[][] = [];
+  const maximumStaff = Math.max(-1, ...candidates.map((candidate) => candidate.staffIndex));
+  for (let staffIndex = 0; staffIndex <= maximumStaff; staffIndex += 1) {
+    const staffEvents = candidates.filter((candidate) => candidate.staffIndex === staffIndex);
+    const groups = new Map<number, Candidate[]>();
+    for (const event of staffEvents) {
+      const measureIndex = barlines[staffIndex].filter((barline) => barline < event.x).length;
+      const group = groups.get(measureIndex) ?? [];
+      group.push(event);
+      groups.set(measureIndex, group);
+    }
+    measures.push(...groups.values());
+  }
+  return measures.filter((measure) => measure.length > 0);
+}
+
+function decodeRhythmByMeasure(candidates: Candidate[], barlines: number[][], staves: Staff[]) {
+  const staffNotes = candidates.filter((candidate): candidate is NoteCandidate => candidate.kind === "note");
+  staffNotes.forEach((note, index) => {
+    const previous = staffNotes[index - 1];
+    if (!previous || previous.staffIndex !== note.staffIndex) return;
+    const crossesBarline = barlines[note.staffIndex].some(
+      (barline) => barline > previous.x && barline < note.x,
+    );
+    if (crossesBarline) {
+      previous.beamToNext = false;
+      note.beamToPrevious = false;
+    }
+  });
+  staffNotes.forEach((note, index) => {
+    const previous = staffNotes[index - 1];
+    if (
+      previous && previous.staffIndex === note.staffIndex &&
+      !previous.beamToNext && !note.beamToPrevious && note.beamToNext &&
+      previous.stemUp === note.stemUp &&
+      note.x - previous.x < staves[note.staffIndex].spacing * 4.4 &&
+      !barlines[note.staffIndex].some((barline) => barline > previous.x && barline < note.x)
+    ) {
+      previous.beamToNext = true;
+      note.beamToPrevious = true;
+    }
+  });
+  let beamGroup: NoteCandidate[] = [];
+  const commitBeamGroup = () => {
+    if (beamGroup.length >= 4) {
+      const sixteenthEvidence = beamGroup.filter((note) => note.subdivisionCount === 2).length;
+      if (sixteenthEvidence >= Math.ceil(beamGroup.length / 2)) {
+        beamGroup.forEach((note) => { note.subdivisionCount = 2; });
+      }
+    }
+    beamGroup = [];
+  };
+  staffNotes.forEach((note, index) => {
+    const previous = staffNotes[index - 1];
+    if (!previous || previous.staffIndex !== note.staffIndex || !note.beamToPrevious) commitBeamGroup();
+    beamGroup.push(note);
+    if (!note.beamToNext) commitBeamGroup();
+  });
+  commitBeamGroup();
+
+  const measures = groupMeasures(candidates, barlines);
+  const meterCandidates = [2, 3, 4].map((beats) => {
+    const decoded = measures.map((measure) => decodeMeasureRhythm(measure, beats));
+    const exactCount = decoded.filter((measure) => measure.exact).length;
+    const cost = decoded.reduce((sum, measure) => sum + measure.cost, 0) +
+      (decoded.length - exactCount) * 4 + beats * 0.12;
+    return { beats, decoded, exactCount, cost };
+  });
+  const bestMeter = meterCandidates.reduce((best, current) =>
+    current.cost < best.cost ? current : best,
+  );
+  bestMeter.decoded.forEach((decoded, measureIndex) => {
+    measures[measureIndex].forEach((event, eventIndex) => {
+      const beats = decoded.beats[eventIndex];
+      event.beats = beats;
+      if (event.kind === "note" && event.filled) {
+        const plainBeats = beats / (event.dotted ? 1.5 : 1);
+        event.subdivisionCount = plainBeats >= 0.99 ? 0 : plainBeats >= 0.49 ? 1 : 2;
+      }
+    });
+  });
+  return bestMeter.beats;
+}
+
 function detectScoreCandidates(binary: BinaryImage) {
   const staves = detectStaves(binary);
-  if (staves.length === 0) return { staves, candidates: [] as Candidate[] };
+  if (staves.length === 0) return {
+    staves,
+    candidates: [] as Candidate[],
+    barlines: [] as number[][],
+    meterBeats: 4,
+    slurCount: 0,
+  };
   const clean = removeStaffLines(binary, staves);
   const notes = detectNoteCandidates(binary, clean, staves);
   const rests = detectRestCandidates(binary, clean, staves, notes);
   const candidates: Candidate[] = [...notes, ...rests]
     .sort((a, b) => a.staffIndex - b.staffIndex || a.x - b.x)
     .slice(0, 192);
-  return { staves, candidates };
+  const barlines = filterBarlines(staves, candidates, detectBarlines(binary, staves));
+  const slurCount = detectSlurArticulations(
+    clean,
+    binary.width,
+    binary.height,
+    staves,
+    notes,
+    barlines,
+  );
+  const meterBeats = decodeRhythmByMeasure(candidates, barlines, staves);
+  return { staves, candidates, barlines, meterBeats, slurCount };
 }
 
 export function recognizeBinaryScore(binary: BinaryImage): {
   staffCount: number;
   events: BinaryScoreEvent[];
+  barlines: number[][];
+  meterBeats: number;
+  slurCount: number;
 } {
-  const { staves, candidates } = detectScoreCandidates(binary);
+  const { staves, candidates, barlines, meterBeats, slurCount } = detectScoreCandidates(binary);
   return {
     staffCount: staves.length,
+    barlines,
+    meterBeats,
+    slurCount,
     events: candidates.map((candidate) => ({
       kind: candidate.kind,
       written: candidate.kind === "rest"
@@ -1171,6 +1860,10 @@ export function recognizeBinaryScore(binary: BinaryImage): {
       confidence: candidate.kind === "rest"
         ? clamp(candidate.score, 0.46, 0.94)
         : clamp(0.42 + candidate.score * 1.25, 0.46, 0.98),
+      subdivisionCount: candidate.kind === "note" ? candidate.subdivisionCount : 0,
+      measureIndex: barlines[candidate.staffIndex].filter((barline) => barline < candidate.x).length,
+      articulation: candidate.kind === "note" ? candidate.articulation : "silent",
+      restType: candidate.kind === "rest" ? candidate.restType : null,
     })),
   };
 }
@@ -1180,7 +1873,8 @@ function annotatePreview(canvas: HTMLCanvasElement, staves: Staff[], candidates:
   if (!context) return canvas.toDataURL("image/jpeg", 0.88);
   context.save();
   context.lineWidth = Math.max(2, canvas.width / 700);
-  context.font = `700 ${Math.max(13, canvas.width / 70)}px Arial, sans-serif`;
+  const fontSize = Math.max(11, canvas.width / 115);
+  context.font = `700 ${fontSize}px Arial, sans-serif`;
   context.textBaseline = "bottom";
 
   for (const staff of staves) {
@@ -1194,6 +1888,7 @@ function annotatePreview(canvas: HTMLCanvasElement, staves: Staff[], candidates:
     }
   }
   context.setLineDash([]);
+  const labelRows = staves.map(() => [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY]);
   candidates.forEach((candidate, index) => {
     const spacing = staves[candidate.staffIndex].spacing;
     const isRest = candidate.kind === "rest";
@@ -1209,8 +1904,32 @@ function annotatePreview(canvas: HTMLCanvasElement, staves: Staff[], candidates:
     } else {
       context.strokeRect(candidate.x - spacing, candidate.y - spacing * 0.72, spacing * 2, spacing * 1.44);
     }
-    const label = notes[index]?.kind === "rest" ? "休" : notes[index]?.written ?? "?";
-    context.fillText(label, candidate.x - spacing, candidate.y - spacing * 0.88);
+    const note = notes[index];
+    const rhythmLabel = note?.beats === 0.25 ? "16" : note?.beats === 0.5 ? "8" : note?.beats === 0.75 ? "附8" : note?.beats === 1 ? "4" : note?.beats === 1.5 ? "附4" : note?.beats === 2 ? "2" : `${note?.beats ?? "?"}拍`;
+    const articulationLabel = note?.kind === "note"
+      ? note.articulation === "tongued" ? "吐" : "连"
+      : "静";
+    const label = `${note?.kind === "rest" ? "休" : note?.written ?? "?"} · ${rhythmLabel} · ${articulationLabel}`;
+    const metrics = context.measureText(label);
+    const paddingX = Math.max(3, spacing * 0.24);
+    const labelWidth = metrics.width + paddingX * 2;
+    const labelLeft = clamp(candidate.x - labelWidth / 2, 2, canvas.width - labelWidth - 2);
+    const rowRights = labelRows[candidate.staffIndex];
+    let row = rowRights.findIndex((right) => right + spacing * 0.3 <= labelLeft);
+    if (row < 0) row = rowRights.indexOf(Math.min(...rowRights));
+    rowRights[row] = labelLeft + labelWidth;
+    const baseline = staves[candidate.staffIndex].lines[0] - spacing * (1.1 + row * 1.2);
+    const labelHeight = fontSize * 1.35;
+    context.fillStyle = "rgba(255, 253, 247, .94)";
+    context.fillRect(labelLeft, baseline - labelHeight, labelWidth, labelHeight);
+    context.strokeStyle = isRest ? "rgba(51,127,158,.66)" : "rgba(233,104,74,.66)";
+    context.strokeRect(labelLeft, baseline - labelHeight, labelWidth, labelHeight);
+    context.beginPath();
+    context.moveTo(candidate.x, baseline);
+    context.lineTo(candidate.x, candidate.y - spacing * 0.82);
+    context.stroke();
+    context.fillStyle = isRest ? "#246d89" : "#be4d36";
+    context.fillText(label, labelLeft + paddingX, baseline - fontSize * 0.08);
   });
   context.restore();
   return canvas.toDataURL("image/jpeg", 0.9);
@@ -1241,7 +1960,7 @@ export async function recognizeScoreImage(file: File): Promise<RecognitionResult
   context.setTransform(1, 0, 0, 1, 0, 0);
 
   const binary = binarize(corrected);
-  const { staves, candidates } = detectScoreCandidates(binary);
+  const { staves, candidates, meterBeats, slurCount } = detectScoreCandidates(binary);
   if (staves.length === 0) {
     throw new Error("没有找到连续的五条谱线，请裁掉多余背景并保持照片水平后重试");
   }
@@ -1264,6 +1983,7 @@ export async function recognizeScoreImage(file: File): Promise<RecognitionResult
       id: `recognized-${index}-${written}`,
       confidence,
       source: "recognized",
+      articulation: candidate.articulation,
     });
   });
   const confidence = notes.reduce((sum, note) => sum + note.confidence, 0) / notes.length;
@@ -1287,5 +2007,10 @@ export async function recognizeScoreImage(file: File): Promise<RecognitionResult
     restCount,
     dottedCount,
     subdivisionCount,
+    meterBeats,
+    slurNoteCount: notes.filter(
+      (note) => note.kind === "note" && note.articulation !== "tongued",
+    ).length,
+    slurGroupCount: slurCount,
   };
 }

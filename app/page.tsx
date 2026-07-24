@@ -10,12 +10,12 @@ import {
   type ClarinetRegister,
   type FingeringVariant,
   type LessonNote,
+  type NoteArticulation,
   TOTAL_FINGERING_VARIANTS,
   YAMAHA_FINGERING_SOURCE,
 } from "./lib/clarinet";
 import { recognizeScoreImage, type RecognitionResult } from "./lib/score-recognition";
 
-const beatLabels = ["1", "2", "3", "4"];
 const durationOptions = [
   { beats: 0.25, label: "十六分音符／休止符 · ¼ 拍" },
   { beats: 0.5, label: "八分音符 · ½ 拍" },
@@ -40,6 +40,13 @@ function confidenceLabel(confidence: number) {
   if (confidence >= 0.82) return "高";
   if (confidence >= 0.66) return "中";
   return "待校对";
+}
+
+function articulationLabel(articulation: LessonNote["articulation"]) {
+  if (articulation === "slur-start") return "连音开始";
+  if (articulation === "slurred") return "连音内";
+  if (articulation === "silent") return "休止";
+  return "吐音";
 }
 
 function RestSymbol({ restType, compact = false }: { restType: LessonNote["restType"]; compact?: boolean }) {
@@ -86,6 +93,8 @@ export default function Home() {
   const timersRef = useRef<number[]>([]);
 
   const selectedNote = lessonNotes[selectedIndex] ?? lessonNotes[0] ?? DEMO_LESSON[0];
+  const meterBeats = recognition?.meterBeats ?? 4;
+  const beatLabels = Array.from({ length: meterBeats }, (_, index) => String(index + 1));
   const selectedFingering = selectedNote.kind === "note" ? selectedNote.fingering : null;
   const libraryEntry = CLARINET_RANGE.find((entry) => entry.value === libraryPitch) ?? CLARINET_RANGE[0];
   const libraryNote = buildLessonNote(libraryEntry.value, 1, { id: `library-${libraryEntry.value}`, source: "manual" });
@@ -161,6 +170,7 @@ export default function Home() {
               id: note.id,
               confidence: 1,
               source: "manual",
+              articulation: note.kind === "note" ? note.articulation : "tongued",
             })
           : note,
       ),
@@ -185,10 +195,23 @@ export default function Home() {
         index === selectedIndex
           ? note.kind === "rest"
             ? buildRestEvent(beats, { id: note.id, confidence: note.confidence, source: "manual" })
-            : buildLessonNote(note.written, beats, { id: note.id, confidence: note.confidence, source: "manual" })
+            : buildLessonNote(note.written, beats, { id: note.id, confidence: note.confidence, source: "manual", articulation: note.articulation })
           : note,
       ),
     );
+  };
+
+  const updateSelectedArticulation = (articulation: NoteArticulation) => {
+    setLessonNotes((notes) => notes.map((note, index) =>
+      index === selectedIndex && note.kind === "note"
+        ? buildLessonNote(note.written, note.beats, {
+            id: note.id,
+            confidence: note.confidence,
+            source: "manual",
+            articulation,
+          })
+        : note,
+    ));
   };
 
   const removeSelectedNote = () => {
@@ -263,7 +286,7 @@ export default function Home() {
     }
     setIsPlaying(true);
     const beatMs = 60000 / bpm;
-    let cursor = countIn ? beatMs * 4 : 0;
+    let cursor = countIn ? beatMs * beatLabels.length : 0;
     if (countIn) {
       beatLabels.forEach((_, index) => {
         timersRef.current.push(window.setTimeout(() => playClick(index === 0), index * beatMs));
@@ -274,7 +297,8 @@ export default function Home() {
         window.setTimeout(() => {
           setSelectedIndex(index);
           if (note.kind === "note") {
-            playTone(note.frequency, Math.max(0.12, (note.beats * beatMs * 0.82) / 1000));
+            const gate = note.articulation === "tongued" ? 0.82 : 0.98;
+            playTone(note.frequency, Math.max(0.12, (note.beats * beatMs * gate) / 1000));
           }
         }, cursor),
       );
@@ -385,7 +409,7 @@ export default function Home() {
 
             {recognition && (
               <div className="recognition-report" role="status">
-                <div><span className="report-check">✓</span><b>识别完成</b><small>{recognition.staffCount} 组五线谱 · {recognition.notes.length - recognition.restCount} 个音符 · {recognition.restCount} 个休止符 · {recognition.dottedCount} 个附点 · {recognition.subdivisionCount} 个连梁细分音符</small></div>
+                <div><span className="report-check">✓</span><b>识别完成 · {recognition.meterBeats}/4 拍</b><small>{recognition.staffCount} 组五线谱 · {recognition.notes.length - recognition.restCount} 个音符 · {recognition.restCount} 个休止符 · {recognition.dottedCount} 个附点 · {recognition.subdivisionCount} 个八／十六分音符 · {recognition.slurGroupCount} 组连音</small></div>
                 <div className="confidence-meter"><span style={{ width: `${recognition.confidence * 100}%` }} /><b>{Math.round(recognition.confidence * 100)}%</b></div>
                 <p>{recognition.warning} 已自动校正 {Math.abs(recognition.deskewDegrees).toFixed(1)}° 倾斜。</p>
               </div>
@@ -404,6 +428,7 @@ export default function Home() {
               <div className="note-facts">
                 <div><span>实际听到</span><b>{selectedNote.sounding}</b></div>
                 <div><span>时值</span><b>{selectedNote.beats} 拍 · {selectedNote.rhythm}</b></div>
+                <div><span>演奏法</span><b>{articulationLabel(selectedNote.articulation)}</b></div>
               </div>
             </div>
 
@@ -436,7 +461,7 @@ export default function Home() {
           <div className="practice-header">
             <div><span className="panel-number dark">C</span><div><h3>识别结果与逐拍练习</h3><p>先校对音名与时值，再播放整段</p></div></div>
             <div className="practice-controls">
-              <label className="count-toggle"><input type="checkbox" checked={countIn} onChange={(event) => setCountIn(event.target.checked)} /><span />4 拍预备</label>
+              <label className="count-toggle"><input type="checkbox" checked={countIn} onChange={(event) => setCountIn(event.target.checked)} /><span />{meterBeats} 拍预备</label>
               <label className="tempo-control"><span>速度</span><input type="range" min="50" max="140" step="2" value={bpm} onChange={(event) => setBpm(Number(event.target.value))} aria-label="练习速度" /><b>{bpm} BPM</b></label>
               <button className={`play-button ${isPlaying ? "playing" : ""}`} type="button" onClick={playLesson}><span aria-hidden="true">{isPlaying ? "■" : "▶"}</span>{isPlaying ? "停止" : "播放整段"}</button>
             </div>
@@ -448,6 +473,7 @@ export default function Home() {
                 <span className="timeline-index">{String(index + 1).padStart(2, "0")}</span>
                 <span className={`note-confidence level-${confidenceLabel(note.confidence)}`}>{confidenceLabel(note.confidence)}</span>
                 {note.kind === "rest" ? <strong><RestSymbol restType={note.restType} compact /></strong> : <strong>{noteHead(note.written)}</strong>}<small>{note.kind === "rest" ? note.rhythm : `${noteOctave(note.written)} · ${note.rhythm}`}</small>
+                <span className={`articulation-badge articulation-${note.articulation}`}>{articulationLabel(note.articulation)}</span>
                 <span className={`beat-bars beats-${String(note.beats).replace(".", "-")}`} aria-label={`${note.beats} 拍`}><i /><i /><i /><i /></span>
               </button>
             ))}
@@ -458,12 +484,13 @@ export default function Home() {
             <label><span>类型</span><select value={selectedNote.kind} onChange={(event) => updateSelectedKind(event.target.value as LessonNote["kind"])}><option value="note">音符</option><option value="rest">休止符</option></select></label>
             <label><span>谱面音</span><select disabled={selectedNote.kind === "rest"} value={selectedNote.kind === "note" ? CLARINET_RANGE.find((entry) => entry.fingering.sourceIndex === selectedNote.fingering.sourceIndex)?.value ?? selectedNote.written : "C4"} onChange={(event) => updateSelectedPitch(event.target.value)}>{CLARINET_RANGE.map((entry) => <option value={entry.value} key={entry.value}>{entry.label}</option>)}</select></label>
             <label><span>时值</span><select value={selectedNote.beats} onChange={(event) => updateSelectedDuration(Number(event.target.value))}>{durationOptions.map((option) => <option value={option.beats} key={option.beats}>{option.label}</option>)}</select></label>
+            <label><span>吐音／连音</span><select disabled={selectedNote.kind === "rest"} value={selectedNote.kind === "note" ? selectedNote.articulation : "tongued"} onChange={(event) => updateSelectedArticulation(event.target.value as NoteArticulation)}><option value="tongued">吐音</option><option value="slur-start">连音开始</option><option value="slurred">连音内</option></select></label>
             <button type="button" className="edit-action add" onClick={addNoteAfterSelected}>＋ 补一个音</button>
             <button type="button" className="edit-action rest" onClick={addRestAfterSelected}>＋ 补休止</button>
             <button type="button" className="edit-action remove" onClick={removeSelectedNote} disabled={lessonNotes.length <= 1}>删除</button>
           </div>
 
-          <div className="rhythm-guide"><span>四拍脉冲</span><div>{beatLabels.map((beat) => <i key={beat}><b>{beat}</b></i>)}</div><p>支持十六分、八分、附点、连梁细分与全／二分／四分／八分／十六分休止；休止段只推进拍点，不发音。</p></div>
+          <div className="rhythm-guide"><span>{meterBeats}/4 拍脉冲</span><div style={{ gridTemplateColumns: `repeat(${meterBeats}, 1fr)` }}>{beatLabels.map((beat) => <i key={beat}><b>{beat}</b></i>)}</div><p>支持四分、八分、十六分、附点、连音／吐音，以及全／二分／四分／八分／十六分休止；休止段只推进拍点，不发音。</p></div>
         </article>
       </section>
 

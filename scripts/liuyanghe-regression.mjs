@@ -25,7 +25,7 @@ await sharp(sourcePath)
 const byStaff = Array.from({ length: result.staffCount }, (_, staffIndex) =>
   result.events
     .filter((event) => event.staffIndex === staffIndex)
-    .map((event) => `${Math.round(event.x)}@${Math.round(event.y)}=${event.written}:${event.beats}`)
+    .map((event) => `${Math.round(event.x)}@${Math.round(event.y)}=${event.written}:${event.beats}:${event.articulation}`)
     .join(" "),
 );
 
@@ -35,6 +35,9 @@ console.log(JSON.stringify({
   eventCount: result.events.length,
   restCount: result.events.filter((event) => event.kind === "rest").length,
   dottedCount: result.events.filter((event) => event.rhythmMark === "dotted").length,
+  meterBeats: result.meterBeats,
+  slurCount: result.slurCount,
+  barlines: result.barlines.map((staff) => staff.map((x) => Math.round(x))),
   overlay: outputPath,
   byStaff,
 }, null, 2));

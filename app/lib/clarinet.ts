@@ -21,6 +21,8 @@ export type Fingering = {
 
 export type LessonEventSource = "demo" | "recognized" | "manual";
 export type RestType = "whole" | "half" | "quarter" | "eighth" | "sixteenth";
+export type NoteArticulation = "tongued" | "slur-start" | "slurred";
+export type LessonArticulation = NoteArticulation | "silent";
 
 type LessonEventBase = {
   id: string;
@@ -33,6 +35,7 @@ type LessonEventBase = {
   staffOffset: number;
   confidence: number;
   source: LessonEventSource;
+  articulation: LessonArticulation;
 };
 
 export type LessonPitchEvent = LessonEventBase & {
@@ -158,7 +161,7 @@ function diatonicStaffOffset(pitch: string): number {
 export function buildLessonNote(
   written: string,
   beats = 1,
-  options: Partial<Pick<LessonNote, "id" | "confidence" | "source">> = {},
+  options: Partial<Pick<LessonNote, "id" | "confidence" | "source" | "articulation">> = {},
 ): LessonPitchEvent {
   const normalized = normalizeAccidentals(written);
   const midi = pitchToMidi(normalized);
@@ -175,6 +178,7 @@ export function buildLessonNote(
     staffOffset: diatonicStaffOffset(normalized),
     confidence: options.confidence ?? 1,
     source: options.source ?? "manual",
+    articulation: options.articulation === "silent" ? "tongued" : options.articulation ?? "tongued",
     fingering: getFingering(normalized),
     restType: null,
   };
@@ -205,6 +209,7 @@ export function buildRestEvent(
     staffOffset: 0,
     confidence: options.confidence ?? 1,
     source: options.source ?? "manual",
+    articulation: "silent",
     fingering: null,
     restType,
   };
