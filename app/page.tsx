@@ -407,7 +407,7 @@ export default function Home() {
               <span className="button-icon" aria-hidden="true">{isAnalyzing ? "···" : "◎"}</span>
               <span>
                 <b>{isAnalyzing ? "正在校正谱线并寻找音符…" : uploadedFile ? "开始识别这张谱面" : "使用示例进入课堂"}</b>
-                <small>{uploadedFile ? "识别音高、附点、连梁与休止符" : "含休止、附点与十六分音符的示例"}</small>
+                <small>{uploadedFile ? "识别音高、附点、连梁与休止符" : "含休止、四分、八分、十六分与二分音符的示例"}</small>
               </span>
               <i aria-hidden="true">→</i>
             </button>

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   ALTERNATE_FINGERING_SOURCE_INDICES,
   CLARINET_RANGE,
+  DEMO_LESSON,
   TOTAL_FINGERING_VARIANTS,
   buildLessonNote,
   buildRestEvent,
@@ -105,4 +106,11 @@ test("keeps tongued and slurred playback instructions separate", () => {
   assert.equal(buildLessonNote("C5").articulation, "tongued");
   assert.equal(buildLessonNote("D5", 0.5, { articulation: "slur-start" }).articulation, "slur-start");
   assert.equal(buildLessonNote("E5", 0.5, { articulation: "slurred" }).articulation, "slurred");
+});
+
+test("keeps the demo E as an undotted quarter note", () => {
+  const demoE = DEMO_LESSON.find((event) => event.id === "demo-e4");
+  assert.equal(demoE?.kind, "note");
+  assert.equal(demoE?.beats, 1);
+  assert.equal(demoE?.rhythm, "四分音符");
 });

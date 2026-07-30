@@ -62,6 +62,9 @@ test("ships local recognition, correction tools, and the complete fingering data
   assert.match(page, /sizes=\{compact \? "190px" : "240px"\}\s+unoptimized/);
   assert.match(styles, /\.lab-grid\s*\{[^}]*align-items:\s*start/s);
   assert.match(styles, /\.score-panel,\s*\.fingering-panel\s*\{[^}]*align-self:\s*start/s);
+  const staffRule = styles.match(/\.staff\s*\{(?<rule>[^}]*)\}/s)?.groups?.rule ?? "";
+  assert.equal((staffRule.match(/linear-gradient\(#555, #555\)/g) ?? []).length, 5);
+  assert.match(staffRule, /center 18px,\s*center 32px,\s*center 46px,\s*center 60px,\s*center 74px/);
   assert.match(recognizer, /estimateSkew/);
   assert.match(recognizer, /detectStaves/);
   assert.match(recognizer, /detectAccidental/);

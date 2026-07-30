@@ -232,7 +232,7 @@ export const DEMO_LESSON: LessonNote[] = [
   buildLessonNote("C4", 0.5, { id: "demo-c4", source: "demo" }),
   buildLessonNote("D4", 0.5, { id: "demo-d4", source: "demo" }),
   buildRestEvent(0.5, { id: "demo-rest", source: "demo" }),
-  buildLessonNote("E4", 1.5, { id: "demo-e4", source: "demo" }),
+  buildLessonNote("E4", 1, { id: "demo-e4", source: "demo" }),
   buildLessonNote("F4", 0.25, { id: "demo-f4", source: "demo" }),
   buildLessonNote("G4", 0.25, { id: "demo-g4", source: "demo" }),
   buildLessonNote("A4", 2, { id: "demo-a4", source: "demo" }),

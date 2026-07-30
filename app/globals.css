@@ -178,7 +178,28 @@ a { color: inherit; text-decoration: none; }
 .sample-sheet { width: min(100%, 570px); background: #fff; min-height: 195px; padding: 20px 28px 16px; transform: rotate(-.7deg); box-shadow: 0 10px 28px rgba(20,30,27,.13); position: relative; }
 .sample-sheet::after { content: ""; position: absolute; inset: 6px; border: 1px solid #eeeae2; pointer-events: none; }
 .sheet-title { display: flex; justify-content: space-between; font: 10px Georgia, serif; color: #555; letter-spacing: .08em; }
-.staff { height: 92px; margin-top: 16px; position: relative; display: grid; grid-template-columns: 52px 30px repeat(7, 1fr); align-items: center; background: repeating-linear-gradient(to bottom, transparent 0 13px, #555 14px, transparent 15px); background-size: 100% 70px; background-position: center 10px; background-repeat: no-repeat; }
+.staff {
+  height: 92px;
+  margin-top: 16px;
+  position: relative;
+  display: grid;
+  grid-template-columns: 52px 30px repeat(7, 1fr);
+  align-items: center;
+  background-image:
+    linear-gradient(#555, #555),
+    linear-gradient(#555, #555),
+    linear-gradient(#555, #555),
+    linear-gradient(#555, #555),
+    linear-gradient(#555, #555);
+  background-size: 100% 1px;
+  background-position:
+    center 18px,
+    center 32px,
+    center 46px,
+    center 60px,
+    center 74px;
+  background-repeat: no-repeat;
+}
 .clef { font: 67px/1 "Times New Roman", serif; transform: translateY(3px); color: #222; }
 .time-signature { font: 700 19px/16px Georgia, serif; text-align: center; }
 .sheet-note { width: 100%; height: 70px; position: relative; display: block; }
