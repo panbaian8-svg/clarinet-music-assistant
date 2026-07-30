@@ -26,6 +26,9 @@ type Staff = {
   spacing: number;
   left: number;
   right: number;
+  referenceX: number;
+  slope: number;
+  anchors: Array<{ x: number; center: number }>;
 };
 
 type NoteCandidate = {
@@ -36,6 +39,9 @@ type NoteCandidate = {
   step: number;
   score: number;
   filled: boolean;
+  headCoreDensity: number;
+  headRingDensity: number;
+  headFillConfidence: number;
   stemUp: boolean;
   stemTop: number;
   beats: number;
@@ -100,6 +106,15 @@ export type BinaryScoreEvent = {
   measureIndex: number;
   articulation: NoteArticulation | "silent";
   restType: RestType | null;
+  headCoreDensity: number | null;
+  headRingDensity: number | null;
+  headFillConfidence: number | null;
+  beamToPrevious: boolean;
+  beamToNext: boolean;
+  primaryBeamSpan: number;
+  primaryBeamCoverage: number;
+  secondaryBeamSpan: number;
+  secondaryBeamCoverage: number;
 };
 
 const clamp = (value: number, min: number, max: number) =>
@@ -285,61 +300,329 @@ function estimateSkew(source: HTMLCanvasElement) {
 
 export function detectStaves(binary: BinaryImage): Staff[] {
   const { data, width, height } = binary;
-  const leftBoundary = Math.floor(width * 0.03);
-  const rightBoundary = Math.ceil(width * 0.97);
-  const span = rightBoundary - leftBoundary;
-  const rowCounts = new Uint32Array(height);
+  const sampleWidth = Math.round(clamp(width / 14, 64, 140));
+  const sampleStep = Math.max(32, Math.round(sampleWidth * 0.55));
+  type LocalLine = { y: number; strength: number };
+  type Hypothesis = {
+    x: number;
+    x0: number;
+    x1: number;
+    lines: number[];
+    spacing: number;
+    strength: number;
+  };
+  const hypotheses: Hypothesis[] = [];
 
-  for (let y = 0; y < height; y += 1) {
-    let count = 0;
-    const row = y * width;
-    for (let x = leftBoundary; x < rightBoundary; x += 1) count += data[row + x];
-    rowCounts[y] = count;
+  for (let x0 = Math.floor(width * 0.025); x0 < width * 0.975 - sampleWidth / 2; x0 += sampleStep) {
+    const x1 = Math.min(Math.ceil(width * 0.975), x0 + sampleWidth);
+    const span = x1 - x0;
+    const rowCounts = new Uint16Array(height);
+    for (let y = 0; y < height; y += 1) {
+      const row = y * width;
+      let count = 0;
+      for (let x = x0; x < x1; x += 1) count += data[row + x];
+      rowCounts[y] = count;
+    }
+
+    const threshold = Math.max(6, span * 0.18);
+    const peakRows = Array.from({ length: Math.max(0, height - 2) }, (_, index) => index + 1)
+      .filter((y) =>
+        rowCounts[y] >= threshold &&
+        rowCounts[y] >= rowCounts[y - 1] &&
+        rowCounts[y] >= rowCounts[y + 1],
+      )
+      .sort((left, right) => rowCounts[right] - rowCounts[left]);
+    const selectedPeaks: number[] = [];
+    peakRows.forEach((peak) => {
+      if (!selectedPeaks.some((existing) => Math.abs(existing - peak) <= 2)) selectedPeaks.push(peak);
+    });
+    const localLines: LocalLine[] = selectedPeaks
+      .map((peak) => {
+        let weighted = 0;
+        let weight = 0;
+        let maximum = 0;
+        for (let row = Math.max(0, peak - 1); row <= Math.min(height - 1, peak + 1); row += 1) {
+          weighted += row * rowCounts[row];
+          weight += rowCounts[row];
+          maximum = Math.max(maximum, rowCounts[row]);
+        }
+        return {
+          y: weight ? weighted / weight : peak,
+          strength: maximum / span,
+        };
+      })
+      .sort((left, right) => left.y - right.y);
+
+    const localHypotheses: Hypothesis[] = [];
+    for (let firstIndex = 0; firstIndex < localLines.length - 4; firstIndex += 1) {
+      const first = localLines[firstIndex];
+      for (
+        let secondIndex = firstIndex + 1;
+        secondIndex < Math.min(localLines.length, firstIndex + 12);
+        secondIndex += 1
+      ) {
+        const spacing = localLines[secondIndex].y - first.y;
+        if (spacing < 4) continue;
+        if (spacing > 55) break;
+        const matches = [first, localLines[secondIndex]];
+        let previousIndex = secondIndex;
+        for (let lineIndex = 2; lineIndex < 5; lineIndex += 1) {
+          const target = first.y + spacing * lineIndex;
+          let bestIndex = -1;
+          let bestDistance = Number.POSITIVE_INFINITY;
+          for (
+            let probe = previousIndex + 1;
+            probe < localLines.length && localLines[probe].y <= target + spacing * 0.3 + 1;
+            probe += 1
+          ) {
+            const distance = Math.abs(localLines[probe].y - target);
+            if (distance < bestDistance) {
+              bestDistance = distance;
+              bestIndex = probe;
+            }
+          }
+          if (bestIndex < 0 || bestDistance > Math.max(1.25, spacing * 0.3)) break;
+          matches.push(localLines[bestIndex]);
+          previousIndex = bestIndex;
+        }
+        if (matches.length !== 5) continue;
+        const lines = matches.map((line) => line.y);
+        const gaps = lines.slice(1).map((line, index) => line - lines[index]);
+        const refinedSpacing = gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length;
+        const deviation = Math.max(...gaps.map((gap) => Math.abs(gap - refinedSpacing)));
+        const strength = matches.reduce((sum, line) => sum + line.strength, 0) / 5;
+        if (deviation > refinedSpacing * 0.28 || strength < 0.23) continue;
+        const center = lines[2];
+        if (localHypotheses.some(
+          (existing) =>
+            Math.abs(existing.lines[2] - center) < refinedSpacing * 0.72 &&
+            Math.abs(existing.spacing - refinedSpacing) < refinedSpacing * 0.24,
+        )) continue;
+        localHypotheses.push({
+          x: (x0 + x1) / 2,
+          x0,
+          x1,
+          lines,
+          spacing: refinedSpacing,
+          strength,
+        });
+      }
+    }
+    hypotheses.push(...localHypotheses);
   }
 
-  const lineRows: number[] = [];
-  let start = -1;
-  for (let y = 0; y <= height; y += 1) {
-    const isLine = y < height && rowCounts[y] > span * 0.22;
-    if (isLine && start < 0) start = y;
-    if (!isLine && start >= 0) {
-      let weighted = 0;
-      let weight = 0;
-      for (let row = start; row < y; row += 1) {
-        weighted += row * rowCounts[row];
-        weight += rowCounts[row];
-      }
-      lineRows.push(weight ? weighted / weight : (start + y - 1) / 2);
-      start = -1;
+  const parents = hypotheses.map((_, index) => index);
+  const root = (index: number): number => {
+    if (parents[index] !== index) parents[index] = root(parents[index]);
+    return parents[index];
+  };
+  const join = (left: number, right: number) => {
+    const leftRoot = root(left);
+    const rightRoot = root(right);
+    if (leftRoot !== rightRoot) parents[rightRoot] = leftRoot;
+  };
+  for (let leftIndex = 0; leftIndex < hypotheses.length; leftIndex += 1) {
+    const left = hypotheses[leftIndex];
+    for (let rightIndex = leftIndex + 1; rightIndex < hypotheses.length; rightIndex += 1) {
+      const right = hypotheses[rightIndex];
+      const spacing = Math.max(left.spacing, right.spacing);
+      if (Math.abs(left.spacing - right.spacing) > spacing * 0.3) continue;
+      const xDistance = Math.abs(left.x - right.x);
+      const allowedDrift = spacing * 0.82 + xDistance * 0.045;
+      if (Math.abs(left.lines[2] - right.lines[2]) <= allowedDrift) join(leftIndex, rightIndex);
     }
   }
+  const grouped = new Map<number, Hypothesis[]>();
+  hypotheses.forEach((hypothesis, index) => {
+    const group = grouped.get(root(index)) ?? [];
+    group.push(hypothesis);
+    grouped.set(root(index), group);
+  });
+  const clusters = [...grouped.values()].map((clusterHypotheses) => ({
+    hypotheses: clusterHypotheses.sort((left, right) => left.x - right.x),
+  }));
 
-  const staves: Staff[] = [];
-  for (let index = 0; index <= lineRows.length - 5; index += 1) {
-    const lines = lineRows.slice(index, index + 5);
-    const gaps = lines.slice(1).map((line, gapIndex) => line - lines[gapIndex]);
-    const spacing = gaps.reduce((sum, gap) => sum + gap, 0) / gaps.length;
-    const deviation = Math.max(...gaps.map((gap) => Math.abs(gap - spacing)));
-    if (spacing < 4 || spacing > 55 || deviation > spacing * 0.28) continue;
-    if (staves.some((staff) => Math.abs(staff.lines[0] - lines[0]) < spacing * 2)) continue;
+  const fitted = clusters
+    .filter((cluster) => {
+      const first = cluster.hypotheses[0];
+      const last = cluster.hypotheses.at(-1)!;
+      return cluster.hypotheses.length >= 2 && last.x1 - first.x0 >= width * 0.075;
+    })
+    .map((cluster): Staff & { support: number } => {
+      const points = cluster.hypotheses;
+      const referenceX = points.reduce((sum, point) => sum + point.x, 0) / points.length;
+      const referenceY = points.reduce((sum, point) => sum + point.lines[2], 0) / points.length;
+      let numerator = 0;
+      let denominator = 0;
+      points.forEach((point) => {
+        numerator += (point.x - referenceX) * (point.lines[2] - referenceY);
+        denominator += (point.x - referenceX) ** 2;
+      });
+      const slope = clamp(denominator ? numerator / denominator : 0, -0.08, 0.08);
+      const spacing = [...points].sort((left, right) => left.spacing - right.spacing)[
+        Math.floor(points.length / 2)
+      ].spacing;
+      const center = referenceY;
+      const anchors = points.map((point) => {
+        const predictedCenter = referenceY + slope * (point.x - referenceX);
+        const staffOffset = Math.round((point.lines[2] - predictedCenter) / spacing);
+        return {
+          x: point.x,
+          center: point.lines[2] - staffOffset * spacing,
+        };
+      });
+      return {
+        lines: [-2, -1, 0, 1, 2].map((offset) => center + offset * spacing),
+        spacing,
+        left: Math.max(0, Math.min(...points.map((point) => point.x0)) - sampleStep),
+        right: Math.min(width - 1, Math.max(...points.map((point) => point.x1)) + sampleStep),
+        referenceX,
+        slope,
+        anchors,
+        support: points.length * points.reduce((sum, point) => sum + point.strength, 0),
+      };
+    })
+    .sort((left, right) => left.lines[2] - right.lines[2]);
 
-    let left = width;
-    let right = 0;
-    for (const line of lines) {
-      const center = Math.round(line);
-      for (let y = Math.max(0, center - 1); y <= Math.min(height - 1, center + 1); y += 1) {
-        for (let x = 0; x < width; x += 1) {
-          if (data[y * width + x]) {
-            left = Math.min(left, x);
-            right = Math.max(right, x);
+  const bounded = fitted
+    .map((initialStaff) => {
+      let staff = { ...initialStaff };
+      if (staff.right - staff.left < width * 0.34) return null;
+      let bestShift = 0;
+      let bestAlignment = -1;
+      for (let shift = -staff.spacing * 1.25; shift <= staff.spacing * 1.25; shift += 0.5) {
+        let ink = 0;
+        let samples = 0;
+        for (let x = staff.left; x <= staff.right; x += 2) {
+          for (let lineIndex = 0; lineIndex < 5; lineIndex += 1) {
+            const center = Math.round(
+              staff.lines[lineIndex] + shift + staff.slope * (x - staff.referenceX),
+            );
+            let lineInk = 0;
+            for (let y = Math.max(0, center - 1); y <= Math.min(height - 1, center + 1); y += 1) {
+              lineInk = Math.max(lineInk, data[y * width + x]);
+            }
+            ink += lineInk;
+            samples += 1;
           }
         }
+        const alignment = ink / Math.max(1, samples);
+        if (alignment > bestAlignment) {
+          bestAlignment = alignment;
+          bestShift = shift;
+        }
       }
+      staff = {
+        ...staff,
+        lines: staff.lines.map((line) => line + bestShift),
+        anchors: staff.anchors.map((anchor) => ({
+          ...anchor,
+          center: anchor.center + bestShift,
+        })),
+      };
+      const radius = Math.max(1, Math.round(staff.spacing * 0.14));
+      const hits = new Uint8Array(width);
+      for (let x = 0; x < width; x += 1) {
+        for (let lineIndex = 0; lineIndex < 5; lineIndex += 1) {
+          const center = Math.round(staff.lines[lineIndex] + staff.slope * (x - staff.referenceX));
+          let found = false;
+          for (let y = Math.max(0, center - radius); y <= Math.min(height - 1, center + radius); y += 1) {
+            if (data[y * width + x]) {
+              found = true;
+              break;
+            }
+          }
+          if (found) hits[x] += 1;
+        }
+      }
+      const windowRadius = Math.max(4, Math.round(staff.spacing * 1.8));
+      const prefix = new Uint32Array(width + 1);
+      for (let x = 0; x < width; x += 1) prefix[x + 1] = prefix[x] + hits[x];
+      const active = new Uint8Array(width);
+      for (let x = 0; x < width; x += 1) {
+        const sampleLeft = Math.max(0, x - windowRadius);
+        const sampleRight = Math.min(width - 1, x + windowRadius);
+        const rolling = prefix[sampleRight + 1] - prefix[sampleLeft];
+        const sampleCount = sampleRight - sampleLeft + 1;
+        active[x] = Number(rolling / sampleCount >= 0.65);
+      }
+      const rawGroups: Array<{ left: number; right: number }> = [];
+      let left = -1;
+      for (let x = 0; x <= width; x += 1) {
+        if (x < width && active[x] && left < 0) left = x;
+        if ((x === width || !active[x]) && left >= 0) {
+          rawGroups.push({ left, right: x - 1 });
+          left = -1;
+        }
+      }
+      const groups: Array<{ left: number; right: number }> = [];
+      rawGroups.forEach((group) => {
+        const previous = groups.at(-1);
+        if (previous && group.left - previous.right <= staff.spacing * 8) previous.right = group.right;
+        else groups.push({ ...group });
+      });
+      const widest = groups.sort(
+        (leftGroup, rightGroup) =>
+          (rightGroup.right - rightGroup.left) - (leftGroup.right - leftGroup.left),
+      )[0];
+      if (!widest) return null;
+      return {
+        ...staff,
+        left: Math.max(0, widest.left - windowRadius),
+        right: Math.min(width - 1, Math.max(staff.right, widest.right + windowRadius)),
+      };
+    })
+    .filter((staff): staff is Staff & { support: number } =>
+      staff !== null && staff.right - staff.left >= width * 0.28,
+    );
+  const medianSpacing = [...bounded]
+    .sort((left, right) => left.spacing - right.spacing)[Math.floor(bounded.length / 2)]
+    ?.spacing;
+  const consistent = medianSpacing
+    ? bounded.filter((staff) =>
+        staff.spacing >= medianSpacing * 0.65 && staff.spacing <= medianSpacing * 1.55,
+      )
+    : bounded;
+
+  const staves: Array<Staff & { support?: number }> = [];
+  consistent.forEach((staff) => {
+    const duplicateIndex = staves.findIndex((existing) => {
+      const comparisonX = (staff.referenceX + existing.referenceX) / 2;
+      const staffCenter = staff.lines[2] + staff.slope * (comparisonX - staff.referenceX);
+      const existingCenter = existing.lines[2] + existing.slope * (comparisonX - existing.referenceX);
+      return Math.abs(staffCenter - existingCenter) < Math.max(staff.spacing, existing.spacing) * 2.4;
+    });
+    if (duplicateIndex < 0) {
+      staves.push(staff);
+      return;
     }
-    staves.push({ lines, spacing, left: Math.max(0, left), right: Math.min(width - 1, right) });
-    index += 4;
+    if ((staff.support ?? 0) > (staves[duplicateIndex].support ?? 0)) staves[duplicateIndex] = staff;
+  });
+  return staves
+    .sort((left, right) => left.lines[2] - right.lines[2])
+    .map((staff) => {
+      const { support, ...publicStaff } = staff;
+      void support;
+      return publicStaff;
+    });
+}
+
+function staffLineAt(staff: Staff, lineIndex: number, x: number) {
+  let center = staff.lines[2] + staff.slope * (x - staff.referenceX);
+  if (staff.anchors.length > 0) {
+    const rightIndex = staff.anchors.findIndex((anchor) => anchor.x >= x);
+    if (rightIndex === 0) {
+      center = staff.anchors[0].center;
+    } else if (rightIndex < 0) {
+      center = staff.anchors.at(-1)!.center;
+    } else {
+      const left = staff.anchors[rightIndex - 1];
+      const right = staff.anchors[rightIndex];
+      const progress = (x - left.x) / Math.max(1, right.x - left.x);
+      center = left.center + (right.center - left.center) * progress;
+    }
   }
-  return staves;
+  return center + (lineIndex - 2) * staff.spacing;
 }
 
 function removeStaffLines(binary: BinaryImage, staves: Staff[]) {
@@ -347,10 +630,10 @@ function removeStaffLines(binary: BinaryImage, staves: Staff[]) {
   const { width, height, data } = binary;
   for (const staff of staves) {
     const halfThickness = Math.max(1, Math.round(staff.spacing * 0.11));
-    for (const line of staff.lines) {
-      const center = Math.round(line);
-      for (let y = Math.max(0, center - halfThickness); y <= Math.min(height - 1, center + halfThickness); y += 1) {
-        for (let x = staff.left; x <= staff.right; x += 1) {
+    for (let lineIndex = 0; lineIndex < 5; lineIndex += 1) {
+      for (let x = staff.left; x <= staff.right; x += 1) {
+        const center = Math.round(staffLineAt(staff, lineIndex, x));
+        for (let y = Math.max(0, center - halfThickness); y <= Math.min(height - 1, center + halfThickness); y += 1) {
           if (!data[y * width + x]) continue;
           const above = Math.max(0, center - halfThickness - 2);
           const below = Math.min(height - 1, center + halfThickness + 2);
@@ -396,6 +679,23 @@ function rectangleSum(
     integral[bottom * stride + left] +
     integral[top * stride + left]
   );
+}
+
+function rectangleDensity(
+  integral: Uint32Array,
+  width: number,
+  height: number,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+) {
+  const left = clamp(Math.floor(x0), 0, width);
+  const top = clamp(Math.floor(y0), 0, height);
+  const right = clamp(Math.ceil(x1), 0, width);
+  const bottom = clamp(Math.ceil(y1), 0, height);
+  const area = Math.max(1, (right - left) * (bottom - top));
+  return rectangleSum(integral, width, height, left, top, right, bottom) / area;
 }
 
 type GlyphComponent = {
@@ -550,8 +850,8 @@ export function detectBarlines(binary: BinaryImage, staves = detectStaves(binary
     const endX = staff.right - spacing * 0.4;
     const activeColumns: number[] = [];
     for (let x = Math.round(startX); x <= Math.round(endX); x += 1) {
-      const topLine = Math.round(staff.lines[0]);
-      const bottomLine = Math.round(staff.lines[4]);
+      const topLine = Math.round(staffLineAt(staff, 0, x));
+      const bottomLine = Math.round(staffLineAt(staff, 4, x));
       const run = longestVerticalRun(
         binary.data,
         binary.width,
@@ -732,8 +1032,15 @@ function detectStemSubdivisionCount(
   const maximumOffset = Math.max(3, Math.round(spacing * 1.9));
   const allowedGap = Math.max(1, Math.round(spacing * 0.1));
   const minimumBandHeight = Math.max(2, Math.round(spacing * 0.13));
-  const bands: Array<{ rows: number; span: number; coverage: number }> = [];
-  let activeBand: { rows: number; span: number; coverage: number } | null = null;
+  type AttachmentBand = {
+    rows: number;
+    span: number;
+    coverage: number;
+    startOffset: number;
+    endOffset: number;
+  };
+  const bands: AttachmentBand[] = [];
+  let activeBand: AttachmentBand | null = null;
   let gap = 0;
 
   for (let offset = 0; offset <= maximumOffset; offset += 1) {
@@ -747,10 +1054,19 @@ function detectStemSubdivisionCount(
     );
     const active = stats.span >= 0.44 && stats.coverage >= 0.18;
     if (active) {
-      if (!activeBand) activeBand = { rows: 0, span: 0, coverage: 0 };
+      if (!activeBand) {
+        activeBand = {
+          rows: 0,
+          span: 0,
+          coverage: 0,
+          startOffset: offset,
+          endOffset: offset,
+        };
+      }
       activeBand.rows += 1;
       activeBand.span = Math.max(activeBand.span, stats.span);
       activeBand.coverage = Math.max(activeBand.coverage, stats.coverage);
+      activeBand.endOffset = offset;
       gap = 0;
       continue;
     }
@@ -762,10 +1078,27 @@ function detectStemSubdivisionCount(
     gap = 0;
   }
   if (activeBand && activeBand.rows >= minimumBandHeight) bands.push(activeBand);
-  const primary = bands[0] ?? { span: 0, coverage: 0 };
-  const secondary = bands[1] ?? { span: 0, coverage: 0 };
+  const emptyBand: AttachmentBand = {
+    rows: 0,
+    span: 0,
+    coverage: 0,
+    startOffset: 0,
+    endOffset: 0,
+  };
+  const primary = bands[0] ?? emptyBand;
+  const primaryCenter = (primary.startOffset + primary.endOffset) / 2;
+  const secondary =
+    bands.slice(1).find((band) => {
+      const center = (band.startOffset + band.endOffset) / 2;
+      return (
+        center - primaryCenter >= spacing * 0.52 &&
+        band.span >= 0.55 &&
+        band.coverage >= 0.34
+      );
+    }) ?? emptyBand;
+  const count = primary.rows === 0 ? 0 : secondary.rows > 0 ? 2 : 1;
   return {
-    count: Math.min(2, bands.length),
+    count,
     primarySpan: primary.span,
     primaryCoverage: primary.coverage,
     secondarySpan: secondary.span,
@@ -852,7 +1185,10 @@ function detectBeamCount(
   if (bestRatio < 0.48 || bestCoverage < 0.76) return 0;
   let secondaryRatio = 0;
   let secondaryCoverage = 0;
-  for (let separation = 0.48; separation <= 0.8; separation += 0.08) {
+  // A thick single beam can occupy almost half a staff space. Starting the
+  // second-beam probe farther away prevents the lower edge of that same beam
+  // from being counted as a sixteenth-note beam.
+  for (let separation = 0.64; separation <= 1.02; separation += 0.06) {
     const secondaryOffset = bestDirection * spacing * separation;
     const stats = stripStats(bestLeftY - secondaryOffset, bestRightY - secondaryOffset);
     if (stats.ratio * stats.coverage > secondaryRatio * secondaryCoverage) {
@@ -860,7 +1196,7 @@ function detectBeamCount(
       secondaryCoverage = stats.coverage;
     }
   }
-  return secondaryRatio > 0.5 && secondaryCoverage > 0.74 ? 2 : 1;
+  return secondaryRatio > 0.54 && secondaryCoverage > 0.78 ? 2 : 1;
 }
 
 export function pitchFromStaffStep(step: number, accidental: "♯" | "♭" | "") {
@@ -880,18 +1216,17 @@ function refineNoteHeadPosition(
   staff: Staff,
 ) {
   const spacing = staff.spacing;
-  const left = clamp(Math.round(candidate.x - spacing * 0.78), 0, width - 1);
-  const right = clamp(Math.round(candidate.x + spacing * 0.78), 0, width - 1);
-  const top = clamp(Math.round(candidate.y - spacing * 0.95), 0, height - 1);
-  const bottom = clamp(Math.round(candidate.y + spacing * 0.95), 0, height - 1);
+  const sampleLeft = clamp(Math.round(candidate.x - spacing * 0.78), 0, width - 1);
+  const sampleRight = clamp(Math.round(candidate.x + spacing * 0.78), 0, width - 1);
+  const sampleTop = clamp(Math.round(candidate.y - spacing * 0.95), 0, height - 1);
+  const sampleBottom = clamp(Math.round(candidate.y + spacing * 0.95), 0, height - 1);
   let weightedY = 0;
   let totalWeight = 0;
-
-  for (let y = top; y <= bottom; y += 1) {
+  for (let y = sampleTop; y <= sampleBottom; y += 1) {
     let rowInk = 0;
     let longestRun = 0;
     let currentRun = 0;
-    for (let x = left; x <= right; x += 1) {
+    for (let x = sampleLeft; x <= sampleRight; x += 1) {
       if (clean[y * width + x]) {
         rowInk += 1;
         currentRun += 1;
@@ -901,45 +1236,281 @@ function refineNoteHeadPosition(
       }
     }
     if (longestRun > spacing * 1.72) continue;
-    const weight = Math.max(0, rowInk - spacing * 0.12);
+    const weight = Math.max(0, rowInk - spacing * 0.16);
     weightedY += y * weight;
     totalWeight += weight;
   }
-  if (totalWeight < spacing * 0.7) return;
+  const observedCenterY = totalWeight >= spacing * 0.55
+    ? weightedY / totalWeight
+    : candidate.y;
+  const bottomLine = staffLineAt(staff, 4, candidate.x);
+  const xRadius = Math.max(3, spacing * 0.72);
+  const yRadius = Math.max(2, spacing * 0.48);
+  const fitAt = (centerY: number) => {
+    let coreInk = 0;
+    let rawCoreInk = 0;
+    let coreArea = 0;
+    let ringInk = 0;
+    let ringArea = 0;
+    let upperInk = 0;
+    let lowerInk = 0;
+    let leftInk = 0;
+    let rightInk = 0;
+    for (let y = Math.floor(centerY - yRadius); y <= Math.ceil(centerY + yRadius); y += 1) {
+      if (y < 0 || y >= height) continue;
+      for (let x = Math.floor(candidate.x - xRadius); x <= Math.ceil(candidate.x + xRadius); x += 1) {
+        if (x < 0 || x >= width) continue;
+        const dx = (x - candidate.x) / xRadius;
+        const dy = (y - centerY) / yRadius;
+        const radiusSquared = dx * dx + dy * dy;
+        if (radiusSquared > 1) continue;
+        const ink = clean[y * width + x];
+        if (radiusSquared <= 0.16) {
+          coreInk += ink;
+          rawCoreInk += raw[y * width + x];
+          coreArea += 1;
+        } else {
+          ringInk += ink;
+          ringArea += 1;
+        }
+        if (dy < -0.08) upperInk += ink;
+        else if (dy > 0.08) lowerInk += ink;
+        if (dx < -0.08) leftInk += ink;
+        else if (dx > 0.08) rightInk += ink;
+      }
+    }
+    const coreDensity = coreInk / Math.max(1, coreArea);
+    const rawCoreDensity = rawCoreInk / Math.max(1, coreArea);
+    const ringDensity = ringInk / Math.max(1, ringArea);
+    const verticalSymmetry =
+      Math.min(upperInk, lowerInk) / Math.max(1, Math.max(upperInk, lowerInk));
+    const horizontalSymmetry =
+      Math.min(leftInk, rightInk) / Math.max(1, Math.max(leftInk, rightInk));
+    const symmetry = (verticalSymmetry + horizontalSymmetry) / 2;
+    const filledDensity = Math.max(coreDensity, rawCoreDensity * 0.92);
+    const filledScore = filledDensity * 0.68 + ringDensity * 0.14 + symmetry * 0.18;
+    const hollowScore =
+      ringDensity * 0.48 +
+      clamp(1 - coreDensity * 1.25, 0, 1) * 0.36 +
+      symmetry * 0.16;
+    return {
+      score: Math.max(filledScore, hollowScore),
+      // Staff-line removal cuts through noteheads that sit on a line. The raw
+      // image restores that evidence, while a genuinely hollow head retains a
+      // mostly white core even when one thin staff line crosses it.
+      filled: coreDensity >= 0.82 || rawCoreDensity >= 0.86,
+      coreDensity,
+      ringDensity,
+      fillConfidence: Math.max(
+        Math.abs(coreDensity - 0.82),
+        Math.abs(rawCoreDensity - 0.86) * 0.78,
+      ),
+    };
+  };
 
-  const centroidY = weightedY / totalWeight;
-  const refinedStep = Math.round(((staff.lines[4] - centroidY) * 2) / spacing);
-  if (Math.abs(refinedStep - candidate.step) > 1) return;
-  if (refinedStep === candidate.step) return;
-  const refinedY = staff.lines[4] - (refinedStep * spacing) / 2;
-  const xRadius = Math.max(2, Math.round(spacing * 0.3));
-  const yRadius = Math.max(1, Math.round(spacing * 0.2));
-  let coreInk = 0;
-  let coreArea = 0;
-  for (let y = Math.round(refinedY) - yRadius; y <= Math.round(refinedY) + yRadius; y += 1) {
-    for (let x = Math.round(candidate.x) - xRadius; x <= Math.round(candidate.x) + xRadius; x += 1) {
-      if (x < 0 || x >= width || y < 0 || y >= height) continue;
-      coreArea += 1;
-      coreInk += raw[y * width + x];
-    }
+  let best = {
+    step: candidate.step,
+    y: bottomLine - (candidate.step * spacing) / 2,
+    ...fitAt(bottomLine - (candidate.step * spacing) / 2),
+  };
+  for (let step = candidate.step - 2; step <= candidate.step + 2; step += 1) {
+    const y = bottomLine - (step * spacing) / 2;
+    const fit = fitAt(y);
+    const adjustedScore =
+      fit.score -
+      Math.abs(step - candidate.step) * 0.012 -
+      (Math.abs(y - observedCenterY) / spacing) * 0.32;
+    const bestAdjustedScore =
+      best.score -
+      Math.abs(best.step - candidate.step) * 0.012 -
+      (Math.abs(best.y - observedCenterY) / spacing) * 0.32;
+    if (adjustedScore > bestAdjustedScore) best = { step, y, ...fit };
   }
-  const coreDensity = coreInk / Math.max(1, coreArea);
-  let currentCoreInk = 0;
-  let currentCoreArea = 0;
-  for (let y = Math.round(candidate.y) - yRadius; y <= Math.round(candidate.y) + yRadius; y += 1) {
-    for (let x = Math.round(candidate.x) - xRadius; x <= Math.round(candidate.x) + xRadius; x += 1) {
-      if (x < 0 || x >= width || y < 0 || y >= height) continue;
-      currentCoreArea += 1;
-      currentCoreInk += raw[y * width + x];
-    }
-  }
-  const currentCoreDensity = currentCoreInk / Math.max(1, currentCoreArea);
-  if (candidate.filled || coreDensity < 0.7 || coreDensity - currentCoreDensity < 0.2) return;
-  const hasStem = Math.abs(candidate.stemTop - refinedY) > spacing * 1.05;
-  candidate.step = refinedStep;
-  candidate.y = refinedY;
-  candidate.filled = coreDensity >= 0.7;
+  if (best.score < 0.27) return;
+  candidate.step = best.step;
+  candidate.y = best.y;
+  candidate.filled = best.filled;
+  candidate.headCoreDensity = best.coreDensity;
+  candidate.headRingDensity = best.ringDensity;
+  candidate.headFillConfidence = best.fillConfidence;
+  candidate.score = clamp(candidate.score * 0.58 + best.score * 0.42, 0, 1);
+  const hasStem = Math.abs(candidate.stemTop - best.y) > spacing * 1.05;
   candidate.beats = candidate.filled ? 1 : hasStem ? 2 : 4;
+}
+
+function hasRequiredLedgerLines(
+  raw: Uint8Array,
+  width: number,
+  height: number,
+  candidate: NoteCandidate,
+  staff: Staff,
+) {
+  const requiredSteps: number[] = [];
+  if (candidate.step < 0) {
+    for (let step = -2; step >= candidate.step; step -= 2) requiredSteps.push(step);
+  } else if (candidate.step > 8) {
+    for (let step = 10; step <= candidate.step; step += 2) requiredSteps.push(step);
+  }
+  if (requiredSteps.length === 0) return true;
+  return requiredSteps.every((step) => {
+    const ledgerY = staffLineAt(staff, 4, candidate.x) - (step * staff.spacing) / 2;
+    const run = longestBoundedHorizontalRun(
+      raw,
+      width,
+      height,
+      candidate.x - staff.spacing * 1.45,
+      candidate.x + staff.spacing * 1.45,
+      ledgerY - staff.spacing * 0.2,
+      ledgerY + staff.spacing * 0.2,
+      staff.spacing * 2.35,
+    );
+    return run >= staff.spacing * 0.58;
+  });
+}
+
+function recoverRegularSequenceGaps(
+  raw: Uint8Array,
+  clean: Uint8Array,
+  width: number,
+  height: number,
+  staves: Staff[],
+  notes: NoteCandidate[],
+) {
+  staves.forEach((staff, staffIndex) => {
+    const staffNotes = notes
+      .filter((note) => note.staffIndex === staffIndex)
+      .sort((left, right) => left.x - right.x);
+    const gaps = staffNotes
+      .slice(1)
+      .map((note, index) => note.x - staffNotes[index].x)
+      .filter((gap) => gap >= staff.spacing * 1.25 && gap <= staff.spacing * 3.8)
+      .sort((left, right) => left - right);
+    if (gaps.length < 4) return;
+    const typicalGap = gaps[Math.floor(gaps.length * 0.42)];
+    const recovered: NoteCandidate[] = [];
+    for (let index = 0; index < staffNotes.length - 1; index += 1) {
+      const previous = staffNotes[index];
+      const next = staffNotes[index + 1];
+      const gap = next.x - previous.x;
+      if (gap < typicalGap * 1.72 || gap > typicalGap * 2.28) continue;
+      let best: NoteCandidate | null = null;
+      let bestEvidence = 0;
+      const midpoint = (previous.x + next.x) / 2;
+      for (
+        let probeX = Math.round(midpoint - staff.spacing * 0.7);
+        probeX <= Math.round(midpoint + staff.spacing * 0.7);
+        probeX += 1
+      ) {
+        const minimumStep = Math.min(previous.step, next.step) - 2;
+        const maximumStep = Math.max(previous.step, next.step) + 2;
+        for (let step = minimumStep; step <= maximumStep; step += 1) {
+          const y = staffLineAt(staff, 4, probeX) - (step * staff.spacing) / 2;
+          const headRun = longestBoundedHorizontalRun(
+            clean,
+            width,
+            height,
+            probeX - staff.spacing * 1.25,
+            probeX + staff.spacing * 1.25,
+            y - staff.spacing * 0.3,
+            y + staff.spacing * 0.3,
+            staff.spacing * 1.72,
+          );
+          if (headRun < staff.spacing * 0.48 || headRun > staff.spacing * 1.62) continue;
+          const coverage = horizontalRunCoverage(
+            clean,
+            width,
+            height,
+            probeX - staff.spacing,
+            probeX + staff.spacing,
+            y - staff.spacing * 0.5,
+            y + staff.spacing * 0.5,
+            staff.spacing * 0.38,
+            staff.spacing * 1.8,
+          );
+          if (coverage < staff.spacing * 0.42) continue;
+          const stemOffsets = [0.46, 0.58, 0.7, 0.82, 0.94, 1.06];
+          const leftProbe = stemOffsets
+            .map((offset) => ({
+              offset,
+              run: longestVerticalRun(
+                clean,
+                width,
+                height,
+                Math.round(probeX - staff.spacing * offset),
+                Math.round(y - staff.spacing * 3.2),
+                Math.round(y + staff.spacing * 3.2),
+              ),
+            }))
+            .sort((left, right) => right.run.length - left.run.length)[0];
+          const rightProbe = stemOffsets
+            .map((offset) => ({
+              offset,
+              run: longestVerticalRun(
+                clean,
+                width,
+                height,
+                Math.round(probeX + staff.spacing * offset),
+                Math.round(y - staff.spacing * 3.2),
+                Math.round(y + staff.spacing * 3.2),
+              ),
+            }))
+            .sort((left, right) => right.run.length - left.run.length)[0];
+          const rightAttached =
+            rightProbe.run.length > staff.spacing * 1.15 &&
+            rightProbe.run.start < y - staff.spacing * 0.7 &&
+            rightProbe.run.end >= y - staff.spacing * 0.4;
+          const leftAttached =
+            leftProbe.run.length > staff.spacing * 1.15 &&
+            leftProbe.run.end > y + staff.spacing * 0.7 &&
+            leftProbe.run.start <= y + staff.spacing * 0.4;
+          if (!rightAttached && !leftAttached) continue;
+          const stemUp = rightAttached || !leftAttached;
+          const stemProbe = stemUp ? rightProbe : leftProbe;
+          const evidence =
+            headRun / staff.spacing * 0.44 +
+            coverage / staff.spacing * 0.31 +
+            clamp(stemProbe.run.length / (staff.spacing * 3), 0, 1) * 0.25 -
+            Math.abs(probeX - midpoint) / Math.max(1, typicalGap) * 0.12;
+          if (evidence <= bestEvidence) continue;
+          bestEvidence = evidence;
+          best = {
+            kind: "note",
+            staffIndex,
+            x: probeX,
+            y,
+            step,
+            score: clamp(evidence * 0.72, 0.48, 0.84),
+            filled: true,
+            headCoreDensity: 1,
+            headRingDensity: 1,
+            headFillConfidence: 0.18,
+            stemUp,
+            stemTop: stemUp ? stemProbe.run.start : stemProbe.run.end,
+            beats: 1,
+            accidental: "",
+            dotted: false,
+            dotX: null,
+            subdivisionCount: 0,
+            stemX: probeX + staff.spacing * (stemUp ? stemProbe.offset : -stemProbe.offset),
+            rhythmEvidence: {
+              primarySpan: 0,
+              primaryCoverage: 0,
+              secondarySpan: 0,
+              secondaryCoverage: 0,
+            },
+            beamToPrevious: false,
+            beamToNext: false,
+            articulation: "tongued",
+          };
+        }
+      }
+      if (!best) continue;
+      refineNoteHeadPosition(raw, clean, width, height, best, staff);
+      if (hasRequiredLedgerLines(raw, width, height, best, staff)) recovered.push(best);
+    }
+    notes.push(...recovered);
+  });
+  notes.sort((left, right) => left.staffIndex - right.staffIndex || left.x - right.x);
 }
 
 function detectNoteCandidates(binary: BinaryImage, clean: Uint8Array, staves: Staff[]) {
@@ -950,29 +1521,48 @@ function detectNoteCandidates(binary: BinaryImage, clean: Uint8Array, staves: St
 
   staves.forEach((staff, staffIndex) => {
     const spacing = staff.spacing;
+    const previousStaff = staves[staffIndex - 1];
+    const nextStaff = staves[staffIndex + 1];
     const rx = Math.max(3, spacing * 0.64);
     const ry = Math.max(2, spacing * 0.42);
-    const clefAndMeterWidth = staffIndex === 0 ? spacing * 6.2 : spacing * 4.05;
+    const clefAndMeterWidth = spacing * 8.5;
     const startX = Math.max(staff.left + clefAndMeterWidth, width * 0.045);
     const endX = Math.min(staff.right - spacing, width * 0.98);
     const scanStep = Math.max(1, Math.round(spacing * 0.12));
 
-    for (let step = -1; step <= 12; step += 1) {
-      const y = staff.lines[4] - (step * spacing) / 2;
-      if (y < 2 || y >= height - 2) continue;
-      const scores: Array<{ x: number; score: number }> = [];
+    // B-flat clarinet written range supported by the fingering library: E3–A6.
+    // Relative to the treble-staff bottom-line E4 this is diatonic step -7…17.
+    for (let step = -7; step <= 17; step += 1) {
+      const scores: Array<{ x: number; y: number; score: number }> = [];
       for (let x = startX; x <= endX; x += scanStep) {
+        const y = staffLineAt(staff, 4, x) - (step * spacing) / 2;
+        if (y < 2 || y >= height - 2) continue;
+        const staffCenter = staffLineAt(staff, 2, x);
+        const upperBoundary = previousStaff
+          ? (staffLineAt(previousStaff, 2, x) + staffCenter) / 2
+          : Number.NEGATIVE_INFINITY;
+        const lowerBoundary = nextStaff
+          ? (staffLineAt(nextStaff, 2, x) + staffCenter) / 2
+          : Number.POSITIVE_INFINITY;
+        if (y <= upperBoundary || y >= lowerBoundary) continue;
         const ink = rectangleSum(cleanIntegral, width, height, x - rx, y - ry, x + rx, y + ry);
         const area = Math.max(1, Math.round(rx * 2) * Math.round(ry * 2));
-        scores.push({ x, score: ink / area });
+        scores.push({ x, y, score: ink / area });
       }
 
       for (let index = 1; index < scores.length - 1; index += 1) {
         const current = scores[index];
-        if (current.score < 0.17 || current.score < scores[index - 1].score || current.score < scores[index + 1].score) continue;
+        // Hollow half/whole noteheads naturally have much less ink than filled
+        // heads. Keep them in the proposal stage; the later ring, stem, and
+        // ledger checks provide the stricter rejection.
+        if (current.score < 0.1 || current.score < scores[index - 1].score || current.score < scores[index + 1].score) continue;
+        const y = current.y;
         let candidateX = current.x;
         let bestCenterInk = -1;
-        for (let probeX = Math.round(current.x - spacing * 0.55); probeX <= Math.round(current.x + spacing * 0.55); probeX += 1) {
+        // Stay around the horizontal-density maximum. A wider search is drawn
+        // toward the stem or one side of a hollow ring and moves the proposed
+        // center away from the actual notehead.
+        for (let probeX = Math.round(current.x - spacing * 0.14); probeX <= Math.round(current.x + spacing * 0.14); probeX += 1) {
           const centerInk =
             rectangleSum(
               cleanIntegral,
@@ -1029,10 +1619,10 @@ function detectNoteCandidates(binary: BinaryImage, clean: Uint8Array, staves: St
           spacing * 0.38,
           spacing * 1.8,
         );
-        if (headCoverage < spacing * 0.42) continue;
+        if (headCoverage < spacing * 0.34) continue;
 
-        const innerInk = rectangleSum(
-          rawIntegral,
+        const innerRatio = rectangleDensity(
+          cleanIntegral,
           width,
           height,
           candidateX - spacing * 0.32,
@@ -1040,10 +1630,8 @@ function detectNoteCandidates(binary: BinaryImage, clean: Uint8Array, staves: St
           candidateX + spacing * 0.32,
           y + spacing * 0.22,
         );
-        const innerArea = Math.max(1, spacing * 0.64 * spacing * 0.44);
-        const innerRatio = innerInk / innerArea;
-        const coreInk = rectangleSum(
-          rawIntegral,
+        const coreRatio = rectangleDensity(
+          cleanIntegral,
           width,
           height,
           candidateX - spacing * 0.18,
@@ -1051,9 +1639,7 @@ function detectNoteCandidates(binary: BinaryImage, clean: Uint8Array, staves: St
           candidateX + spacing * 0.18,
           y + spacing * 0.14,
         );
-        const coreArea = Math.max(1, spacing * 0.36 * spacing * 0.28);
-        const coreRatio = coreInk / coreArea;
-        const filled = innerRatio > 0.88 && coreRatio > 1.12;
+        const filled = innerRatio > 0.48 && coreRatio > 0.54;
         const stemProbeOffsets = [0.46, 0.58, 0.7, 0.82, 0.94, 1.06, 1.18];
         const leftStemProbe = stemProbeOffsets
           .map((offset) => ({
@@ -1086,7 +1672,7 @@ function detectNoteCandidates(binary: BinaryImage, clean: Uint8Array, staves: St
         const hasStem = rightAttached || leftAttached;
         if (filled && !hasStem) continue;
         if (!filled && headRun < spacing * 0.72) continue;
-        if (!filled && !hasStem && headCoverage < spacing * 0.42) continue;
+        if (!filled && !hasStem && headCoverage < spacing * 0.34) continue;
         if (!filled && !hasStem && headRun > spacing * 1.34) continue;
         const runRatio = headRun / spacing;
         const coverageRatio = headCoverage / spacing;
@@ -1101,14 +1687,14 @@ function detectNoteCandidates(binary: BinaryImage, clean: Uint8Array, staves: St
           coverageShapeScore * 0.19 +
           fillEvidence * 0.18 +
           (hasStem ? 0.05 : 0);
-        if (headScore < 0.5) continue;
+        if (headScore < 0.46) continue;
         const centerVerticalRun = longestVerticalRun(
           data,
           width,
           height,
           Math.round(candidateX),
-          Math.round(staff.lines[0] - spacing * 0.8),
-          Math.round(staff.lines[4] + spacing * 0.8),
+          Math.round(staffLineAt(staff, 0, candidateX) - spacing * 0.8),
+          Math.round(staffLineAt(staff, 4, candidateX) + spacing * 0.8),
         );
         if (centerVerticalRun.length > spacing * 3.6) continue;
         const accidental = detectAccidental(cleanIntegral, clean, width, height, candidateX, y, spacing);
@@ -1120,6 +1706,9 @@ function detectNoteCandidates(binary: BinaryImage, clean: Uint8Array, staves: St
           step,
           score: headScore,
           filled,
+          headCoreDensity: coreRatio,
+          headRingDensity: innerRatio,
+          headFillConfidence: Math.abs(coreRatio - 0.54),
           stemUp,
           stemTop: stemUp ? stem.start : stem.end,
           beats: filled ? 1 : hasStem ? 2 : 4,
@@ -1228,6 +1817,13 @@ function detectNoteCandidates(binary: BinaryImage, clean: Uint8Array, staves: St
       staves[candidate.staffIndex],
     );
   });
+  for (let index = kept.length - 1; index >= 0; index -= 1) {
+    const candidate = kept[index];
+    if (!hasRequiredLedgerLines(data, width, height, candidate, staves[candidate.staffIndex])) {
+      kept.splice(index, 1);
+    }
+  }
+  recoverRegularSequenceGaps(data, clean, width, height, staves, kept);
   kept.forEach((candidate, index) => {
     if (!candidate.accidental) return;
     const spacing = staves[candidate.staffIndex].spacing;
@@ -1325,14 +1921,18 @@ function detectRestCandidates(
 
   staves.forEach((staff, staffIndex) => {
     const spacing = staff.spacing;
-    const clefAndMeterWidth = staffIndex === 0 ? spacing * 6.2 : spacing * 4.05;
+    const clefAndMeterWidth = spacing * 8.5;
     const startX = Math.max(staff.left + clefAndMeterWidth, width * 0.045);
-    const endX = Math.min(staff.right - spacing, width * 0.98);
+    const endX = Math.min(staff.right - spacing * 2.7, width * 0.98);
+    const topAtLeft = staffLineAt(staff, 0, startX);
+    const topAtRight = staffLineAt(staff, 0, endX);
+    const bottomAtLeft = staffLineAt(staff, 4, startX);
+    const bottomAtRight = staffLineAt(staff, 4, endX);
     const components = connectedComponents(clean, width, height, {
       x0: startX,
-      y0: staff.lines[0] - spacing * 2.1,
+      y0: Math.min(topAtLeft, topAtRight) - spacing * 2.1,
       x1: endX,
-      y1: staff.lines[4] + spacing * 2.1,
+      y1: Math.max(bottomAtLeft, bottomAtRight) + spacing * 2.1,
     });
 
     for (const component of components) {
@@ -1347,8 +1947,8 @@ function detectRestCandidates(
         width,
         height,
         Math.round(x),
-        Math.round(staff.lines[0] - spacing),
-        Math.round(staff.lines[4] + spacing),
+        Math.round(staffLineAt(staff, 0, x) - spacing),
+        Math.round(staffLineAt(staff, 4, x) + spacing),
       );
       if (barlineRun.length > spacing * 3.15) continue;
       const normalizedPixels = component.pixels / Math.max(1, spacing * spacing);
@@ -1358,8 +1958,10 @@ function detectRestCandidates(
       const overlapsNote = notes.some(
         (note) =>
           note.staffIndex === staffIndex &&
-          Math.abs(note.x - x) < spacing * 2.05 &&
-          Math.abs(note.y - y) < spacing * 3.65,
+          // A monophonic clarinet staff cannot contain a sounding note and a
+          // rest at the same horizontal time. Ignoring vertical distance also
+          // prevents a low/high notehead fragment from becoming a fake rest.
+          Math.abs(note.x - x) < spacing * 2.05,
       );
       if (overlapsNote) continue;
 
@@ -1367,7 +1969,7 @@ function detectRestCandidates(
       const classification = classifyRestGlyph({
         widthRatio,
         heightRatio,
-        centerOffset: (y - staff.lines[2]) / spacing,
+        centerOffset: (y - staffLineAt(staff, 2, x)) / spacing,
         density: component.pixels / area,
         lobeCount: countProjectionLobes(clean, width, component),
       });
@@ -1420,11 +2022,14 @@ function detectSlurArticulations(
     if (staffNotes.length < 2) return;
     const slurInk = clean.slice();
     const staffBand = Math.max(1, Math.round(spacing * 0.22));
-    staff.lines.forEach((line) => {
-      for (let y = Math.max(0, Math.round(line) - staffBand); y <= Math.min(height - 1, Math.round(line) + staffBand); y += 1) {
-        slurInk.fill(0, y * width + staff.left, y * width + staff.right + 1);
+    for (let lineIndex = 0; lineIndex < 5; lineIndex += 1) {
+      for (let x = staff.left; x <= staff.right; x += 1) {
+        const center = Math.round(staffLineAt(staff, lineIndex, x));
+        for (let y = Math.max(0, center - staffBand); y <= Math.min(height - 1, center + staffBand); y += 1) {
+          slurInk[y * width + x] = 0;
+        }
       }
-    });
+    }
     staffNotes.forEach((note) => {
       const headLeft = clamp(Math.round(note.x - spacing * 0.68), 0, width - 1);
       const headRight = clamp(Math.round(note.x + spacing * 0.68), 0, width - 1);
@@ -1463,11 +2068,15 @@ function detectSlurArticulations(
       if (duplicate) duplicate.score = Math.max(duplicate.score, score);
       else intervals.push({ start, end, score });
     };
+    const topAtLeft = staffLineAt(staff, 0, staff.left);
+    const topAtRight = staffLineAt(staff, 0, staff.right);
+    const bottomAtLeft = staffLineAt(staff, 4, staff.left);
+    const bottomAtRight = staffLineAt(staff, 4, staff.right);
     const components = connectedComponents(slurInk, width, height, {
       x0: staff.left,
-      y0: staff.lines[0] - spacing * 4.4,
+      y0: Math.min(topAtLeft, topAtRight) - spacing * 4.4,
       x1: staff.right,
-      y1: staff.lines[4] + spacing * 4.4,
+      y1: Math.max(bottomAtLeft, bottomAtRight) + spacing * 4.4,
     }, true);
     const possibleSlurs = components
       .map((component) => {
@@ -1646,6 +2255,22 @@ function rhythmOptions(candidate: Candidate, targetBeats: number) {
     return [candidate.restType === "whole" ? targetBeats : candidate.beats];
   }
   if (!candidate.filled) return [candidate.beats];
+  // A visible beam/flag is direct duration evidence. Do not let the global
+  // meter optimizer rewrite an eighth or sixteenth note merely to make a
+  // noisy measure sum look exact.
+  if (
+    candidate.subdivisionCount > 0 &&
+    (candidate.beamToPrevious || candidate.beamToNext ||
+      candidate.rhythmEvidence.primarySpan >= 0.44)
+  ) {
+    return [
+      applyRhythmMarks(
+        1,
+        candidate.subdivisionCount,
+        candidate.dotted,
+      ),
+    ];
+  }
   const multiplier = candidate.dotted ? 1.5 : 1;
   const baseOptions = candidate.dotted ? [1, 0.5] : [1, 0.5, 0.25];
   return baseOptions.map((beats) => beats * multiplier);
@@ -1766,11 +2391,13 @@ function decodeRhythmByMeasure(candidates: Candidate[], barlines: number[][], st
   });
   let beamGroup: NoteCandidate[] = [];
   const commitBeamGroup = () => {
-    if (beamGroup.length >= 4) {
+    if (beamGroup.length >= 2) {
       const sixteenthEvidence = beamGroup.filter((note) => note.subdivisionCount === 2).length;
-      if (sixteenthEvidence >= Math.ceil(beamGroup.length / 2)) {
-        beamGroup.forEach((note) => { note.subdivisionCount = 2; });
-      }
+      const consensusSubdivision =
+        sixteenthEvidence >= Math.ceil(beamGroup.length * 0.75) ? 2 : 1;
+      beamGroup.forEach((note) => {
+        note.subdivisionCount = consensusSubdivision;
+      });
     }
     beamGroup = [];
   };
@@ -1819,8 +2446,7 @@ function detectScoreCandidates(binary: BinaryImage) {
   const notes = detectNoteCandidates(binary, clean, staves);
   const rests = detectRestCandidates(binary, clean, staves, notes);
   const candidates: Candidate[] = [...notes, ...rests]
-    .sort((a, b) => a.staffIndex - b.staffIndex || a.x - b.x)
-    .slice(0, 192);
+    .sort((a, b) => a.staffIndex - b.staffIndex || a.x - b.x);
   const barlines = filterBarlines(staves, candidates, detectBarlines(binary, staves));
   const slurCount = detectSlurArticulations(
     clean,
@@ -1864,6 +2490,15 @@ export function recognizeBinaryScore(binary: BinaryImage): {
       measureIndex: barlines[candidate.staffIndex].filter((barline) => barline < candidate.x).length,
       articulation: candidate.kind === "note" ? candidate.articulation : "silent",
       restType: candidate.kind === "rest" ? candidate.restType : null,
+      headCoreDensity: candidate.kind === "note" ? candidate.headCoreDensity : null,
+      headRingDensity: candidate.kind === "note" ? candidate.headRingDensity : null,
+      headFillConfidence: candidate.kind === "note" ? candidate.headFillConfidence : null,
+      beamToPrevious: candidate.kind === "note" ? candidate.beamToPrevious : false,
+      beamToNext: candidate.kind === "note" ? candidate.beamToNext : false,
+      primaryBeamSpan: candidate.kind === "note" ? candidate.rhythmEvidence.primarySpan : 0,
+      primaryBeamCoverage: candidate.kind === "note" ? candidate.rhythmEvidence.primaryCoverage : 0,
+      secondaryBeamSpan: candidate.kind === "note" ? candidate.rhythmEvidence.secondarySpan : 0,
+      secondaryBeamCoverage: candidate.kind === "note" ? candidate.rhythmEvidence.secondaryCoverage : 0,
     })),
   };
 }
@@ -1880,10 +2515,10 @@ function annotatePreview(canvas: HTMLCanvasElement, staves: Staff[], candidates:
   for (const staff of staves) {
     context.strokeStyle = "rgba(38, 132, 108, .72)";
     context.setLineDash([8, 6]);
-    for (const line of staff.lines) {
+    for (let lineIndex = 0; lineIndex < 5; lineIndex += 1) {
       context.beginPath();
-      context.moveTo(staff.left, line);
-      context.lineTo(staff.right, line);
+      context.moveTo(staff.left, staffLineAt(staff, lineIndex, staff.left));
+      context.lineTo(staff.right, staffLineAt(staff, lineIndex, staff.right));
       context.stroke();
     }
   }
@@ -1907,7 +2542,11 @@ function annotatePreview(canvas: HTMLCanvasElement, staves: Staff[], candidates:
     const note = notes[index];
     const rhythmLabel = note?.beats === 0.25 ? "16" : note?.beats === 0.5 ? "8" : note?.beats === 0.75 ? "附8" : note?.beats === 1 ? "4" : note?.beats === 1.5 ? "附4" : note?.beats === 2 ? "2" : `${note?.beats ?? "?"}拍`;
     const articulationLabel = note?.kind === "note"
-      ? note.articulation === "tongued" ? "吐" : "连"
+      ? note.articulation === "tongued"
+        ? "吐"
+        : note.articulation === "slur-start"
+          ? "吐→连"
+          : "连"
       : "静";
     const label = `${note?.kind === "rest" ? "休" : note?.written ?? "?"} · ${rhythmLabel} · ${articulationLabel}`;
     const metrics = context.measureText(label);

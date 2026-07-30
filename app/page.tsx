@@ -43,8 +43,8 @@ function confidenceLabel(confidence: number) {
 }
 
 function articulationLabel(articulation: LessonNote["articulation"]) {
-  if (articulation === "slur-start") return "连音开始";
-  if (articulation === "slurred") return "连音内";
+  if (articulation === "slur-start") return "吐音 · 连音开始";
+  if (articulation === "slurred") return "连音内 · 不吐音";
   if (articulation === "silent") return "休止";
   return "吐音";
 }
@@ -238,13 +238,13 @@ export default function Home() {
     return audioContextRef.current;
   };
 
-  const playTone = (frequency: number, duration = 0.8) => {
+  const playTone = (frequency: number, duration = 0.8, tongued = true) => {
     const context = getAudioContext();
     void context.resume();
     const now = context.currentTime;
     const master = context.createGain();
     master.gain.setValueAtTime(0.0001, now);
-    master.gain.exponentialRampToValueAtTime(0.17, now + 0.045);
+    master.gain.exponentialRampToValueAtTime(0.17, now + (tongued ? 0.025 : 0.085));
     master.gain.setValueAtTime(0.17, now + Math.max(0.06, duration - 0.12));
     master.gain.exponentialRampToValueAtTime(0.0001, now + duration);
     master.connect(context.destination);
@@ -297,8 +297,13 @@ export default function Home() {
         window.setTimeout(() => {
           setSelectedIndex(index);
           if (note.kind === "note") {
-            const gate = note.articulation === "tongued" ? 0.82 : 0.98;
-            playTone(note.frequency, Math.max(0.12, (note.beats * beatMs * gate) / 1000));
+            const tongued = note.articulation !== "slurred";
+            const gate = note.articulation === "tongued" ? 0.82 : note.articulation === "slur-start" ? 0.94 : 0.98;
+            playTone(
+              note.frequency,
+              Math.max(0.12, (note.beats * beatMs * gate) / 1000),
+              tongued,
+            );
           }
         }, cursor),
       );
@@ -484,7 +489,7 @@ export default function Home() {
             <label><span>类型</span><select value={selectedNote.kind} onChange={(event) => updateSelectedKind(event.target.value as LessonNote["kind"])}><option value="note">音符</option><option value="rest">休止符</option></select></label>
             <label><span>谱面音</span><select disabled={selectedNote.kind === "rest"} value={selectedNote.kind === "note" ? CLARINET_RANGE.find((entry) => entry.fingering.sourceIndex === selectedNote.fingering.sourceIndex)?.value ?? selectedNote.written : "C4"} onChange={(event) => updateSelectedPitch(event.target.value)}>{CLARINET_RANGE.map((entry) => <option value={entry.value} key={entry.value}>{entry.label}</option>)}</select></label>
             <label><span>时值</span><select value={selectedNote.beats} onChange={(event) => updateSelectedDuration(Number(event.target.value))}>{durationOptions.map((option) => <option value={option.beats} key={option.beats}>{option.label}</option>)}</select></label>
-            <label><span>吐音／连音</span><select disabled={selectedNote.kind === "rest"} value={selectedNote.kind === "note" ? selectedNote.articulation : "tongued"} onChange={(event) => updateSelectedArticulation(event.target.value as NoteArticulation)}><option value="tongued">吐音</option><option value="slur-start">连音开始</option><option value="slurred">连音内</option></select></label>
+            <label><span>吐音／连音</span><select disabled={selectedNote.kind === "rest"} value={selectedNote.kind === "note" ? selectedNote.articulation : "tongued"} onChange={(event) => updateSelectedArticulation(event.target.value as NoteArticulation)}><option value="tongued">吐音</option><option value="slur-start">吐音 · 连音开始</option><option value="slurred">连音内 · 不吐音</option></select></label>
             <button type="button" className="edit-action add" onClick={addNoteAfterSelected}>＋ 补一个音</button>
             <button type="button" className="edit-action rest" onClick={addRestAfterSelected}>＋ 补休止</button>
             <button type="button" className="edit-action remove" onClick={removeSelectedNote} disabled={lessonNotes.length <= 1}>删除</button>

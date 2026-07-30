@@ -9,7 +9,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs && node --import tsx --test tests/recognition-logic.test.ts tests/liuyanghe-regression.test.ts",
+    "test": "npm run build && node --test tests/rendered-html.test.mjs && node --import tsx --test tests/recognition-logic.test.ts tests/liuyanghe-regression.test.ts tests/single-scale-regression.test.ts",
     "test:liuyanghe": "node --import tsx --test tests/liuyanghe-regression.test.ts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"

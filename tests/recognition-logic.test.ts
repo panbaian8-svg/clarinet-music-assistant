@@ -12,6 +12,7 @@ import {
   classifyRestGlyph,
   detectStaves,
   pitchFromStaffStep,
+  recognizeBinaryScore,
 } from "../app/lib/score-recognition";
 
 test("detects one evenly spaced five-line staff", () => {
@@ -31,6 +32,34 @@ test("maps treble-staff positions to written pitches", () => {
   assert.equal(pitchFromStaffStep(1, ""), "F4");
   assert.equal(pitchFromStaffStep(-1, "♭"), "D♭4");
   assert.equal(pitchFromStaffStep(7, "♯"), "E♯5");
+});
+
+test("distinguishes filled quarter and hollow half noteheads on staff lines", () => {
+  const width = 420;
+  const height = 160;
+  const data = new Uint8Array(width * height);
+  for (const y of [50, 60, 70, 80, 90]) {
+    for (let x = 20; x <= 400; x += 1) data[y * width + x] = 1;
+  }
+  const drawNote = (centerX: number, centerY: number, filled: boolean) => {
+    for (let y = centerY - 5; y <= centerY + 5; y += 1) {
+      for (let x = centerX - 7; x <= centerX + 7; x += 1) {
+        const radius = ((x - centerX) / 7) ** 2 + ((y - centerY) / 4.2) ** 2;
+        if (radius <= 1 && (filled || radius >= 0.46)) data[y * width + x] = 1;
+      }
+    }
+    for (let y = centerY - 34; y <= centerY; y += 1) {
+      data[y * width + centerX + 7] = 1;
+      data[y * width + centerX + 8] = 1;
+    }
+  };
+  drawNote(160, 80, true);
+  drawNote(280, 70, false);
+
+  const result = recognizeBinaryScore({ data, width, height, threshold: 160 });
+  const notes = result.events.filter((event) => event.kind === "note");
+  assert.deepEqual(notes.map((note) => note.written), ["G4", "B4"]);
+  assert.deepEqual(notes.map((note) => note.beats), [1, 2]);
 });
 
 test("covers 42 pitches and all 61 separated Yamaha fingering charts", () => {

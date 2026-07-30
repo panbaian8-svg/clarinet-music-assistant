@@ -55,6 +55,8 @@ test("ships local recognition, correction tools, and the complete fingering data
 
   assert.match(page, /recognizeScoreImage/);
   assert.match(page, /校对当前音符/);
+  assert.match(page, /吐音 · 连音开始/);
+  assert.match(page, /连音内 · 不吐音/);
   assert.match(page, /new AudioContext\(\)/);
   assert.match(page, /type="file"/);
   assert.match(page, /sizes=\{compact \? "190px" : "240px"\}\s+unoptimized/);
